@@ -1,5 +1,7 @@
 # GAF Peak Chart Builder (R-3 Residential Heating)
 
+Created by Cathy Kam.
+
 Streamlit app that pulls R-3 (Residential Heating) peak data from gas companies'
 typical-bill schedules (e.g. Attachment DPU-LDC-2-3(d)(3)) into the peak GAF
 chart layout, and exports it as CSV.

@@ -1,5 +1,6 @@
 """
 GAF Peak Chart Builder  (R-3 Residential Heating)
+Created by Cathy Kam
 -------------------------------------------------
 1. Drag and drop each company's typical-bill schedules (e.g. Attachment
    DPU-LDC-2-3(d)(3)), PDF or Excel.
@@ -446,6 +447,7 @@ def blank_part(name):
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="GAF Peak Chart Builder", layout="wide")
 st.title("GAF Peak Chart Builder — R-3 Residential Heating")
+st.caption("Created by Cathy Kam")
 
 with st.sidebar:
     st.header("Period labels")
