@@ -530,6 +530,28 @@ def to_long(sec):
         for c in sec["companies"] for r in c["rows"]])
 
 
+SRC_LABEL = {"filing": "From filing", "shared": "Shared GAF (follows a class in the filing)",
+             "edited": "Edited by hand", "carried": "Carried forward (not updated)", "": ""}
+CARRIED_HTML = "#fff3b0"
+CARRIED_XL = "FFF2CC"
+
+
+def cell_src(c, i, f):
+    src = c.get("src") or []
+    return src[i].get(f, "") if i < len(src) else ""
+
+
+def carried_count(sec):
+    n = tot = 0
+    for c in sec["companies"]:
+        for i, r in enumerate(c["rows"]):
+            for f in ("GAF", "LDAF"):
+                if r[f] is not None:
+                    tot += 1
+                    n += cell_src(c, i, f) == "carried"
+    return n, tot
+
+
 def to_excel(sec):
     """One sheet laid out like the webpage, plus a flat table sheet."""
     from openpyxl import Workbook
@@ -544,6 +566,17 @@ def to_excel(sec):
     r = 1
     ws.cell(r, 1, sec["title"]).font = Font(bold=True, size=14, color="14558F")
     ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+    r += 1
+    yellow = PatternFill("solid", fgColor=CARRIED_XL)
+    n_car, n_tot = carried_count(sec)
+    leg = ws.cell(r, 1, f"Highlighted = carried forward from {sec.get('base_title', 'the last posted section')}"
+                        f" and not updated by any filing ({n_car} of {n_tot} values). "
+                        "Check these before posting.")
+    leg.fill = yellow
+    leg.font = Font(italic=True, size=9)
+    leg.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+    ws.row_dimensions[r].height = 28
     r += 2
     for c in sec["companies"]:
         ws.cell(r, 1, c["name"]).font = Font(bold=True, size=12)
@@ -563,7 +596,7 @@ def to_excel(sec):
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = blue
         r += 1
-        for row in c["rows"]:
+        for ri, row in enumerate(c["rows"]):
             vals = [row["Rate Class"], row["Billing Unit"], row["GAF"], row["LDAF"]]
             for j, v in enumerate(vals, 1):
                 cell = ws.cell(r, j, v)
@@ -571,6 +604,8 @@ def to_excel(sec):
                 if j >= 3:
                     cell.number_format = "0.0000"
                     cell.alignment = Alignment(horizontal="right")
+                    if cell_src(c, ri, HEADER[j - 1]) == "carried":
+                        cell.fill = yellow
             r += 1
         r += 1
     for j, w in enumerate([38, 16, 10, 10, 11], 1):
@@ -578,20 +613,24 @@ def to_excel(sec):
 
     flat = wb.create_sheet("Table")
     cols = ["Section", "Company", "REVISED", "Rate Class", "Billing Unit", "GAF",
-            "LDAF", "Note"]
+            "LDAF", "GAF source", "LDAF source", "Note"]
     flat.append(cols)
     for cell in flat[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = blue
     for c in sec["companies"]:
-        for row in c["rows"]:
+        for ri, row in enumerate(c["rows"]):
+            gs, ls = cell_src(c, ri, "GAF"), cell_src(c, ri, "LDAF")
             flat.append([sec["title"], c["name"], "REVISED" if c["revised"] else "",
                          row["Rate Class"], row["Billing Unit"], row["GAF"], row["LDAF"],
-                         " ".join(c["notes"])])
-    for row in flat.iter_rows(min_row=2, min_col=6, max_col=7):
-        for cell in row:
-            cell.number_format = "0.0000"
-    for j, w in enumerate([62, 50, 10, 34, 16, 10, 10, 60], 1):
+                         SRC_LABEL[gs], SRC_LABEL[ls], " ".join(c["notes"])])
+            xr = flat.max_row
+            for col, sv in ((6, gs), (7, ls)):
+                flat.cell(xr, col).number_format = "0.0000"
+                if sv == "carried":
+                    flat.cell(xr, col).fill = yellow
+                    flat.cell(xr, col + 2).fill = yellow
+    for j, w in enumerate([62, 50, 10, 34, 16, 10, 10, 30, 30, 60], 1):
         flat.column_dimensions[get_column_letter(j)].width = w
     flat.freeze_panes = "A2"
 
@@ -612,18 +651,27 @@ def page_preview_html(sec):
            ".mg table{border-collapse:collapse;width:100%;margin-bottom:.8rem}"
            ".mg th{background:#14558f;color:#fff;text-align:left;padding:.5rem .7rem}"
            ".mg td{border-bottom:1px solid #d9d9d9;padding:.45rem .7rem}"
-           ".mg tr:nth-child(even) td{background:#f2f2f2}</style>")
-    body = [f"<div class='mg'><h2>{e(sec['title'])}</h2>"]
+           ".mg tr:nth-child(even) td{background:#f2f2f2}"
+           f".mg td.car{{background:{CARRIED_HTML}!important}}"
+           f".mg .legend{{display:inline-block;background:{CARRIED_HTML};padding:.25rem .5rem;"
+           "font-size:.85rem;margin-bottom:.5rem}</style>")
+    n_car, n_tot = carried_count(sec)
+    body = [f"<div class='mg'><h2>{e(sec['title'])}</h2>",
+            f"<div class='legend'>Highlighted = carried forward from "
+            f"{e(sec.get('base_title', 'the last posted section'))}, not updated by any "
+            f"filing ({n_car} of {n_tot} values)</div>"]
     for c in sec["companies"]:
         rev = "<span class='rev'>REVISED</span>" if c["revised"] else ""
         body.append(f"<h3>{e(c['name'])}{rev}</h3>")
         body += [f"<p>{e(n)}</p>" for n in c["notes"]]
         body.append("<table><thead><tr>" + "".join(f"<th>{h}</th>" for h in HEADER)
                     + "</tr></thead><tbody>")
-        for r in c["rows"]:
-            body.append("<tr>" + "".join(f"<td>{e(v)}</td>" for v in (
-                r["Rate Class"], r["Billing Unit"], fmt_rate(r["GAF"]),
-                fmt_rate(r["LDAF"]))) + "</tr>")
+        for ri, r in enumerate(c["rows"]):
+            cells = [f"<td>{e(r['Rate Class'])}</td>", f"<td>{e(r['Billing Unit'])}</td>"]
+            for f in ("GAF", "LDAF"):
+                cls = " class='car'" if cell_src(c, ri, f) == "carried" else ""
+                cells.append(f"<td{cls}>{e(fmt_rate(r[f]))}</td>")
+            body.append("<tr>" + "".join(cells) + "</tr>")
         body.append("</tbody></table>")
     body.append("</div>")
     return css + "".join(body)
@@ -749,10 +797,15 @@ def massgov_page():
         c = copy.deepcopy(comp)
         c["revised"] = False
         matched, gaf_moves = set(), {}
+        c["src"] = [{f: ("carried" if row[f] is not None else "") for f in ("GAF", "LDAF")}
+                    for row in c["rows"]]
         for ri, row in enumerate(c["rows"]):
             hit, note = match_rate(row, assigned.get(ci, []))
             if hit:
                 matched.add(ri)
+                for f in ("GAF", "LDAF"):
+                    if hit[f] is not None:
+                        c["src"][ri][f] = "filing"
                 if hit["GAF"] is not None and row["GAF"] is not None and \
                         "mdcq" not in row["Billing Unit"].lower():
                     gaf_moves.setdefault(fmt_rate(row["GAF"]), (round(float(hit["GAF"]), 4),
@@ -776,6 +829,7 @@ def massgov_page():
                 if ri in matched or not mv or "mdcq" in row["Billing Unit"].lower():
                     continue
                 new, src_cls = mv
+                c["src"][ri]["GAF"] = "shared"
                 if fmt_rate(new) != fmt_rate(row["GAF"]):
                     fill_log.append({"Company": c["name"], "Rate Class": row["Rate Class"],
                                      "Field": "GAF", "Posted": fmt_rate(row["GAF"]),
@@ -809,6 +863,14 @@ def massgov_page():
                                     "GAF": st.column_config.NumberColumn(format="%.4f"),
                                     "LDAF": st.column_config.NumberColumn(format="%.4f")})
             rows = df_to_rows(ed)
+            src = []
+            for i, r in enumerate(rows):
+                same_row = i < len(c["rows"]) and \
+                    r["Rate Class"].strip() == c["rows"][i]["Rate Class"].strip()
+                src.append({f: ("" if r[f] is None else
+                                (c["src"][i][f] or "edited")
+                                if same_row and fmt_rate(r[f]) == fmt_rate(c["rows"][i][f])
+                                else "edited") for f in ("GAF", "LDAF")})
             notes = st.text_area("Note(s) under the heading (one per line)",
                                  "\n".join(c["notes"]), key=f"mg_note_{ss.mg_ver}_{ci}")
             changed = not same_rows(rows, posted)
@@ -817,10 +879,17 @@ def massgov_page():
                             help=f"Auto = {'Show' if changed else 'Hide'}")
         final.append({"name": c["name"], "notes": [n.strip() for n in notes.splitlines()
                                                    if n.strip()],
-                      "rows": rows,
+                      "rows": rows, "src": src,
                       "revised": changed if flag == "Auto" else flag == "Show"})
 
-    sec = {"title": title, "companies": final}
+    sec = {"title": title, "companies": final, "base_title": base["title"]}
+    n_car, n_tot = carried_count(sec)
+    if n_car:
+        st.warning(f"{n_car} of {n_tot} values are carried forward from "
+                   f"*{base['title']}* and not updated by any filing — highlighted "
+                   "in yellow below and in the Excel file.")
+    else:
+        st.success("Every value comes from a filing or was edited by hand.")
     with st.container(height=700):
         st.html(page_preview_html(sec))
 
@@ -832,4 +901,6 @@ def massgov_page():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.caption("Sheet 'Webpage layout' follows the page: section title, company "
                "heading (REVISED beside it), note, then the Rate Class / Billing Unit "
-               "/ GAF / LDAF table. Sheet 'Table' has the same data as one flat table.")
+               "/ GAF / LDAF table. Sheet 'Table' has the same data as one flat table "
+               "with the source of each value. Carried-forward values are highlighted "
+               "in yellow in both sheets.")

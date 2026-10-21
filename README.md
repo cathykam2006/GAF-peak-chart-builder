@@ -59,8 +59,10 @@ ready to be transferred to the webpage.
 3. **Review**: pulled rates are shown per file (editable, can be left out);
    each is matched to the page's rate-class rows. A changed GAF can also be
    applied to classes that shared the same posted GAF (e.g. EGMA G-40 to G-43
-   follow R-3). Values not in any filing are carried forward. Companies that
-   changed are marked REVISED automatically.
+   follow R-3). Values not in any filing are carried forward and **highlighted
+   in yellow** (preview and Excel) so they are checked before posting.
+   Companies that changed are marked REVISED automatically.
 4. **Export Excel**: sheet *Webpage layout* (section title, company headings with
    REVISED, notes, Rate Class / Billing Unit / GAF / LDAF tables) and sheet
-   *Table* (same data as one flat table).
+   *Table* (same data as one flat table, with the source of each value:
+   from filing, shared GAF, edited by hand, or carried forward).
