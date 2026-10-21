@@ -50,6 +50,9 @@ Builds the next section of
 1. **Pull the posted rates**: read live from mass.gov. If the site blocks the
    request, drop a saved copy of the page (.html) or paste text copied from it.
    Any posted section can be viewed or exported as CSV, including the full history.
+   All posted revisions are listed newest first, grouped by season, with
+   links to their sections on the page. Any two revisions can be compared
+   (every GAF/LDAF change, and whether the page flagged it REVISED).
 2. **Start the next revision**: pick a base section. The next title and
    effective dates are suggested, e.g. after *Off-Peak/Summer 2026 Rates
    Revision 3 (Effective 10/1/26 through 10/31/26)* it suggests *Peak/Winter
@@ -60,4 +63,5 @@ Builds the next section of
      be applied to other classes that shared the old residential heating GAF.
    - or by editing each company's table and notes directly.
    Companies whose values changed are marked **REVISED** automatically (can be overridden).
-4. **Export** in the page's format: plain text, HTML for the web editor, or CSV.
+4. **Export** in the page's format: plain text, HTML for the web editor, or CSV,
+   plus the updated revision list with the new section on top (text or HTML links).

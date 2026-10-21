@@ -324,6 +324,63 @@ def to_long(sections):
     return pd.DataFrame(recs)
 
 
+def slug(title):
+    """mass.gov anchor: 'Off-Peak/Summer 2026 Rates Revision 3 (Effective
+    10/1/26 through 10/31/26)' -> 'off-peaksummer-2026-rates-revision-3-
+    effective-10126-through-103126'"""
+    s = re.sub(r"[^a-z0-9\s-]", "", title.lower())
+    return re.sub(r"-{2,}", "-", re.sub(r"\s+", "-", s.strip()))
+
+
+def anchor_url(title):
+    return f"{PAGE_URL}#{slug(title)}"
+
+
+def toc_text(titles):
+    return "\n".join(f"{t}\t{anchor_url(t)}" for t in titles) + "\n"
+
+
+def toc_html(titles):
+    e = htmlmod.escape
+    return ("<ul>\n" + "\n".join(f'  <li><a href="#{slug(t)}">{e(t)}</a></li>'
+                                 for t in titles) + "\n</ul>\n")
+
+
+def compare_sections(old, new):
+    """Row-level differences between two sections (old -> new)."""
+    def key(name):
+        low = name.lower()
+        return next((k for k in COMPANY_KEYS if k in low), low)
+    old_by = {key(c["name"]): c for c in old["companies"]}
+    recs = []
+    for c in new["companies"]:
+        o = old_by.pop(key(c["name"]), None)
+        if o is None:
+            recs.append({"Company": c["name"], "Rate Class": "(company added)",
+                         "Field": "", "Old": "", "New": "", "REVISED on page": ""})
+            continue
+        orows = {(r["Rate Class"], r["Billing Unit"]): r for r in o["rows"]}
+        for r in c["rows"]:
+            rk = (r["Rate Class"], r["Billing Unit"])
+            orow = orows.pop(rk, None)
+            for f in ("GAF", "LDAF"):
+                ov = fmt_rate(orow[f]) if orow else "(new row)"
+                nv = fmt_rate(r[f])
+                if ov != nv:
+                    recs.append({"Company": c["name"], "Rate Class": " ".join(rk),
+                                 "Field": f, "Old": ov, "New": nv,
+                                 "REVISED on page": "Yes" if c["revised"] else "No"})
+        for rk in orows:
+            recs.append({"Company": c["name"], "Rate Class": " ".join(rk),
+                         "Field": "(row removed)", "Old": "", "New": "",
+                         "REVISED on page": "Yes" if c["revised"] else "No"})
+    for c in old_by.values():
+        recs.append({"Company": c["name"], "Rate Class": "(company removed)",
+                     "Field": "", "Old": "", "New": "", "REVISED on page": ""})
+    return pd.DataFrame(recs, columns=["Company", "Rate Class", "Field", "Old", "New",
+                                       "REVISED on page"])
+
+
 def show_section(sec):
     st.markdown(f"#### {sec['title']}")
     for c in sec["companies"]:
@@ -444,10 +501,41 @@ def massgov_page():
         return
 
     titles = [s["title"] for s in sections]
+
+    # every posted revision, newest first, grouped by season, with page links
+    st.markdown(f"**Posted revisions ({len(sections)})**")
+    groups = {}
+    for i, s in enumerate(sections):
+        groups.setdefault(f"{s.get('season') or ''} {s.get('yr') or ''}".strip()
+                          or "Other", []).append(i)
+    for g_i, (gname, idxs) in enumerate(groups.items()):
+        with st.expander(f"{gname} — {len(idxs)} section(s)", expanded=g_i == 0):
+            st.markdown("\n".join(
+                f"- [{titles[i]}]({anchor_url(titles[i])})  "
+                f"· revised: {', '.join(c['name'].split(' (')[0] for c in sections[i]['companies'] if c['revised']) or 'none flagged'}"
+                for i in idxs))
+
     pick = st.selectbox("View a posted section", range(len(sections)),
                         format_func=lambda i: titles[i])
     with st.expander("Show section", expanded=False):
         show_section(sections[pick])
+
+    with st.expander("Compare two revisions"):
+        cc = st.columns(2)
+        new_i = cc[0].selectbox("Newer", range(len(sections)), index=0,
+                                format_func=lambda i: titles[i], key="mg_cmp_new")
+        old_i = cc[1].selectbox("Older", range(len(sections)),
+                                index=min(1, len(sections) - 1),
+                                format_func=lambda i: titles[i], key="mg_cmp_old")
+        diff = compare_sections(sections[old_i], sections[new_i])
+        if diff.empty:
+            st.caption("No differences.")
+        else:
+            st.dataframe(diff, hide_index=True, width="stretch")
+            st.download_button("Comparison · CSV",
+                               diff.to_csv(index=False).encode("utf-8-sig"),
+                               file_name="massgov_revision_comparison.csv",
+                               mime="text/csv")
     d1, d2 = st.columns(2)
     d1.download_button("This section · CSV",
                        to_long([sections[pick]]).to_csv(index=False).encode("utf-8-sig"),
@@ -605,3 +693,18 @@ def massgov_page():
         st.code(text_out, language=None)
     with st.expander("Copy HTML"):
         st.code(html_out, language="html")
+
+    # updated list of revisions, new one on top
+    all_titles = [title] + [t for t in titles if t != title]
+    st.markdown("**Updated revision list** (new section on top, with page links)")
+    st.markdown("\n".join(f"- [{t}]({anchor_url(t)})" for t in all_titles[:8])
+                + ("\n- …" if len(all_titles) > 8 else ""))
+    t1, t2 = st.columns(2)
+    t1.download_button("Revision list · text", toc_text(all_titles).encode("utf-8"),
+                       file_name=f"massgov_revision_list_{stamp}.txt",
+                       mime="text/plain")
+    t2.download_button("Revision list · HTML", toc_html(all_titles).encode("utf-8"),
+                       file_name=f"massgov_revision_list_{stamp}.html",
+                       mime="text/html")
+    with st.expander("Copy revision list HTML"):
+        st.code(toc_html(all_titles), language="html")
