@@ -66,3 +66,17 @@ ready to be transferred to the webpage.
    REVISED, notes, Rate Class / Billing Unit / GAF / LDAF tables) and sheet
    *Table* (same data as one flat table, with the source of each value:
    from filing, shared GAF, edited by hand, or carried forward).
+
+## Large filings and many files
+
+- PDFs are read with pypdfium2 (a 250-page filing takes about 1 second) and
+  cached by file content, so each file is read once per session, not on every click.
+- Only pages that mention CGA / GAF / LDAC / LDAF are parsed; invoices, letters
+  and workpapers are skipped.
+- Upload limit is raised to 1 GB per file (`.streamlit/config.toml`).
+- A progress bar shows which file is being read.
+- On the Mass.gov page, a filing can hold several values for one rate class (several
+  scenario sections, current vs proposed). Priority: summary table with classes as
+  columns (e.g. Form IIA) > rate table > typical-bill schedule that proposes the rate
+  > other schedules. Other values found are listed beside each class. When several
+  files cover the same company they are combined the same way; hand edits win.

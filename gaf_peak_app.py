@@ -82,14 +82,13 @@ def ldaf_columns(prior_short, proposed_short, ldaf_date):
 # Reading files -> list of (page label, lines)
 # ---------------------------------------------------------------------------
 
+@st.cache_data(show_spinner=False, max_entries=64)
 def read_pages(name, data):
     lname = name.lower()
     pages = []
     if lname.endswith(".pdf"):
-        import pdfplumber
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            for i, page in enumerate(pdf.pages, 1):
-                pages.append((f"p.{i}", (page.extract_text() or "").splitlines()))
+        from pdf_text import pdf_pages
+        pages = [(f"p.{i}", lines) for i, lines in enumerate(pdf_pages(data), 1)]
     elif lname.endswith((".xlsx", ".xlsm", ".xls")):
         for sname, df in pd.read_excel(io.BytesIO(data), sheet_name=None,
                                        header=None).items():
@@ -137,7 +136,10 @@ def is_r3_page(lines):
     if re.search(r"low income|non-heating", cls):
         return False
     m = re.search(r"\br[- ]?(\d)\b", cls)
-    return (m.group(1) == "3") if m else "residential heating" in cls
+    ok = (m.group(1) == "3") if m else "residential heating" in cls
+    # must be a typical-bill schedule (monthly columns), not e.g. a tariff page
+    return ok and any(len(re.findall(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
+                                     l.lower())) >= 10 for l in lines[:40])
 
 
 # ---------------------------------------------------------------------------
@@ -489,8 +491,14 @@ def peak_chart_page():
 
     if files:
         assign = {}
-        for f in files:
-            pages = read_pages(f.name, f.getvalue())
+        bar = st.progress(0.0, text="Reading files…")
+        for n_f, f in enumerate(files):
+            bar.progress(n_f / len(files), text=f"Reading {f.name} ({n_f + 1} of {len(files)})…")
+            try:
+                pages = read_pages(f.name, f.getvalue())
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Could not read {f.name}: {e}")
+                continue
             comp = guess_company(f.name, pages)
             r3 = [p for p in pages if is_r3_page(p[1])]
             c1, c2 = st.columns([3, 2])
@@ -502,6 +510,7 @@ def peak_chart_page():
                 "Company", ["— skip —"] + DATA_COMPANIES,
                 index=DATA_COMPANIES.index(comp) + 1 if comp else 0,
                 key=f"co_{f.name}", label_visibility="collapsed"), r3 or pages)
+        bar.empty()
 
         if st.button("Identify sections", type="primary"):
             sections = []

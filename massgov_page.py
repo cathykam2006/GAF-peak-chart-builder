@@ -364,38 +364,166 @@ def extract_table_rows(lines):
     return out
 
 
+COL_HDR_TOKEN = re.compile(r"^(?:[RGT]-\d{1,2}[A-Z]?|L)$")
+VAL_RE = re.compile(r"\$\s*\(\s*[\d,]*\.?\d+\s*\)|\$\s*-?[\d,]*\.?\d+|\$\s*-(?![\d.])|"
+                    r"(?<![\w.])\(?-?\d*\.\d{3,6}\)?(?![\w.])")
+RELEVANT = re.compile(r"cost of gas|\bcga\b|\bgaf\b|ldac|ldaf|local distribution", re.I)
+
+
+def extract_column_table(lines):
+    """Summary tables with rate classes as columns, e.g. Form IIA:
+    'Rate Schedule R-1 R-2 R-3 R-4 L G-40 ... G-53' then
+    'Total LDAC Rate per Therm $ 0.6299 $ 0.4027 ...'."""
+    out, cols = [], None
+    for line in lines:
+        toks = line.split()
+        codes = [t for t in toks if COL_HDR_TOKEN.match(t)]
+        if len([c for c in codes if c != "L"]) >= 3 and \
+                sum(1 for t in toks if re.search(r"\d\.\d", t)) == 0:
+            cols = codes
+            continue
+        if not cols:
+            continue
+        kind = ("LDAF" if LDAF_LABEL.search(line) else
+                "GAF" if GAF_LABEL.search(line) and not re.search(r"recon", line, re.I)
+                else None)
+        if not kind:
+            continue
+        vals = VAL_RE.findall(line)
+        if len(vals) < len(cols):
+            continue
+        vals = vals[-len(cols):]
+        label = re.sub(r"^\d+\s*", "", line.split("$")[0]).strip()
+        for code, v in zip(cols, vals):
+            if code == "L":
+                continue
+            num = to_num(v.replace("$", "")) if re.search(r"\d", v) else None
+            if num is None:
+                continue
+            out.append({"codes": {re.sub(r"[A-Z]$", "", code) if code[0] in "RGT" else code},
+                        "code": code, "kind": kind, "value": num, "label": label[:60]})
+    return out
+
+
 def read_pdf(name, data):
-    import pdfplumber
-    pages = []
-    with pdfplumber.open(io.BytesIO(data)) as pdf:
-        for i, p in enumerate(pdf.pages, 1):
-            pages.append((i, (p.extract_text() or "").splitlines()))
-    return pages
+    from pdf_text import pdf_pages
+    return list(enumerate(pdf_pages(data), 1))
 
 
+def scenario_of(lines):
+    for l in lines[:20]:
+        if re.search(r"compared to|\bvs\.?\s", l, re.I) and not re.match(r"^\s*\d", l):
+            return l.strip()
+    return ""
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
 def analyse_pdf(name, data, month):
-    """Returns dict(kind='page'|'filing', sections | rates, company)."""
+    """Returns dict(kind='page'|'filing', sections | candidates, company)."""
     pages = read_pdf(name, data)
     full = "\n".join("\n".join(l) for _, l in pages)
     if SECTION_RE.search(full) and re.search(r"Rate Class\s+Billing Unit", full):
         return {"kind": "page", "sections": parse_page_text(full)}
-    comp = company_key(name) or company_key(full[:4000])
-    rates = []
+    comp = company_key(name) or company_key(full[:6000])
+    cands = []          # one entry per (class, value) seen anywhere in the file
+    scanned = 0
     for pno, lines in pages:
+        text = "\n".join(lines)
+        if not RELEVANT.search(text):
+            continue                       # invoices, letters, workpapers...
+        scanned += 1
         sch = extract_schedule(lines, month)
         if sch:
-            rates.append({"Source": f"p.{pno} · {sch['class_line']}",
-                          "Rate class (filing)": ", ".join(sorted(sch["codes"])),
-                          "codes": sch["codes"], "Billing Unit": "$/Therm",
-                          "GAF": sch["gaf"], "LDAF": sch["ldaf"],
-                          "Block": sch["which"], "low_income": sch["low_income"]})
+            proposes_ldaf = (sch["which"] == "proposed" and sch["ldaf"] is not None
+                             and sch["cur_ldaf"] is not None
+                             and fmt_rate(sch["ldaf"]) != fmt_rate(sch["cur_ldaf"]))
+            for kind, v in (("GAF", sch["gaf"]), ("LDAF", sch["ldaf"])):
+                if v is None:
+                    continue
+                cands.append({"codes": sch["codes"], "kind": kind, "value": v,
+                              "unit": "$/Therm", "page": pno,
+                              "where": sch["class_line"], "scenario": scenario_of(lines),
+                              "rank": (2 if sch["which"] == "proposed" else 0)
+                                      + (1 if kind == "LDAF" and proposes_ldaf else 0)})
             continue
-        for r in extract_table_rows(lines):
-            rates.append({"Source": f"p.{pno} · {r['label'][:60]}",
-                          "Rate class (filing)": r["label"][:60], "codes": r["codes"],
-                          "Billing Unit": r["unit"], "GAF": r["gaf"], "LDAF": r["ldaf"],
-                          "Block": "table", "low_income": "low income" in r["label"].lower()})
-    return {"kind": "filing", "company": comp, "rates": rates, "pages": len(pages)}
+        col_rows = extract_column_table(lines)
+        for r in col_rows:
+            cands.append({"codes": r["codes"], "kind": r["kind"], "value": r["value"],
+                          "unit": "$/Therm", "page": pno, "where": r["label"],
+                          "scenario": "summary table", "rank": 4})
+        for r in ([] if col_rows else extract_table_rows(lines)):
+            for kind in ("GAF", "LDAF"):
+                v = r["gaf"] if kind == "GAF" else r["ldaf"]
+                if v is not None:
+                    cands.append({"codes": r["codes"], "kind": kind, "value": v,
+                                  "unit": r["unit"], "page": pno, "where": r["label"][:60],
+                                  "scenario": "rate table", "rank": 3})
+    return {"kind": "filing", "company": comp, "rates": consolidate(cands),
+            "candidates": cands, "pages": len(pages), "scanned": scanned}
+
+
+def consolidate(cands):
+    """One row per rate class: best GAF and best LDAF, with sources."""
+    keyed = {}
+    for c in cands:
+        cls = sorted(x for x in c["codes"] if re.match(r"[RGT]-\d", x)) or sorted(c["codes"])
+        key = (", ".join(cls), c["unit"])
+        keyed.setdefault(key, []).append(c)
+    rows = []
+    for (cls, unit), cs in keyed.items():
+        row = {"Rate class (filing)": cls, "codes": set().union(*(c["codes"] for c in cs)),
+               "Billing Unit": unit, "GAF": None, "LDAF": None, "Source": "",
+               "Other values": "", "rank_GAF": -1, "rank_LDAF": -1,
+               "low_income": bool({"R-2", "R-4"} & set(cls.split(", ")))}
+        srcs, others = [], []
+        for kind in ("GAF", "LDAF"):
+            ks = sorted([c for c in cs if c["kind"] == kind], key=lambda c: (-c["rank"], c["page"]))
+            if not ks:
+                continue
+            best = ks[0]
+            row[kind] = best["value"]
+            row[f"rank_{kind}"] = best["rank"]
+            scen = f" — {best['scenario']}" if best["scenario"] else ""
+            srcs.append(f"{kind}: p.{best['page']}{scen}")
+            alt = sorted({fmt_rate(c["value"]) for c in ks} - {fmt_rate(best["value"])})
+            if alt:
+                others.append(f"{kind} also {', '.join(alt)}")
+        row["Source"] = "; ".join(srcs)
+        row["Other values"] = "; ".join(others)
+        rows.append(row)
+    order = lambda r: (r["Rate class (filing)"][:1] != "R", r["Rate class (filing)"])
+    return sorted(rows, key=order)
+
+
+def merge_rates(rows):
+    """Combine reviewed rows from several files for one company: per rate class
+    and field, the highest-ranked source wins (hand edits rank highest)."""
+    out = {}
+    for r in rows:
+        key = (r["Rate class (filing)"], r["Billing Unit"])
+        cur = out.setdefault(key, {**r, "GAF": None, "LDAF": None, "Source": "",
+                                   "Other values": "", "rank_GAF": -1, "rank_LDAF": -1,
+                                   "_src": {}, "_other": []})
+        for kind in ("GAF", "LDAF"):
+            v = r[kind]
+            if v is None:
+                continue
+            if r[f"rank_{kind}"] > cur[f"rank_{kind}"]:
+                if cur[kind] is not None and fmt_rate(cur[kind]) != fmt_rate(v):
+                    cur["_other"].append(f"{kind} {fmt_rate(cur[kind])} ({cur['_src'][kind]})")
+                cur[kind], cur[f"rank_{kind}"] = v, r[f"rank_{kind}"]
+                part = dict(re.findall(r"(GAF|LDAF): ([^;]+)", r["Source"])).get(kind, "")
+                cur["_src"][kind] = ("typed by hand" if r[f"rank_{kind}"] == 99
+                                     else f"{r['_file']} {part}".strip())
+            elif fmt_rate(cur[kind]) != fmt_rate(v):
+                cur["_other"].append(f"{kind} {fmt_rate(v)} ({r['_file']})")
+        cur["codes"] = cur["codes"] | r["codes"]
+    merged = []
+    for cur in out.values():
+        cur["Source"] = "; ".join(f"{k}: {f}" for k, f in cur["_src"].items())
+        cur["Other values"] = "; ".join(cur["_other"])
+        merged.append(cur)
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -718,19 +846,25 @@ def massgov_page():
     month = MONTHS[start.month - 1]
 
     if files:
-        for f in files:
-            key = (f.name, f.size, month)
-            if ss.mg_files.get(f.name, {}).get("key") != key:
-                try:
-                    res = analyse_pdf(f.name, f.getvalue(), month)
-                except Exception as e:  # noqa: BLE001
-                    res = {"kind": "error", "error": str(e)}
-                res["key"] = key
-                ss.mg_files[f.name] = res
-                if res["kind"] == "page" and res["sections"]:
-                    ss.mg_base = res["sections"][0]
-                    ss.mg_ver += 1
-                    st.rerun()
+        todo = [f for f in files
+                if ss.mg_files.get(f.name, {}).get("key") != (f.name, f.size, month)]
+        bar = st.progress(0.0, text="Reading PDFs…") if todo else None
+        for n_f, f in enumerate(todo):
+            bar.progress(n_f / len(todo),
+                         text=f"Reading {f.name} ({n_f + 1} of {len(todo)})…")
+            try:
+                res = analyse_pdf(f.name, f.getvalue(), month)
+            except Exception as e:  # noqa: BLE001
+                res = {"kind": "error", "error": str(e)}
+            res = {**res, "key": (f.name, f.size, month)}
+            ss.mg_files[f.name] = res
+            if res["kind"] == "page" and res["sections"]:
+                ss.mg_base = res["sections"][0]
+                ss.mg_ver += 1
+        if bar is not None:
+            bar.empty()
+            if any(ss.mg_files[f.name]["kind"] == "page" for f in todo):
+                st.rerun()
         for gone in set(ss.mg_files) - {f.name for f in files}:
             del ss.mg_files[gone]
     else:
@@ -747,43 +881,63 @@ def massgov_page():
 
     names = [c["name"] for c in base["companies"]]
     keys = [company_key(c) for c in names]
-    assigned = {}                          # company index -> list of rates
+    collected = {}                         # company index -> reviewed rows (all files)
     if filings:
         st.subheader("2 · Rates pulled from the filings")
-        st.caption(f"Monthly schedules are read for **{start:%B}** (the effective "
-                   f"month). Proposed rates are used when the filing has them. "
-                   f"Edit any value or untick a row to leave it out.")
-        for fi, (fname, res) in enumerate(filings.items()):
-            with st.container(border=True):
-                c1, c2 = st.columns([3, 2])
-                c1.markdown(f"**{fname}** · {res['pages']} page(s), "
-                            f"{len(res['rates'])} rate row(s) found")
-                guess = keys.index(res["company"]) if res["company"] in keys else None
-                ci = c2.selectbox("Company on the page", range(len(names)),
+        st.caption(f"Monthly schedules are read for **{start:%B}** (the effective month). "
+                   "Priority when a file has several values for a class: summary "
+                   "table (e.g. Form IIA) > rate table > typical-bill schedule that "
+                   "proposes the rate > other schedules. When several files cover the "
+                   "same company they are combined the same way; values you type win.")
+        summary = []
+        for fname, res in filings.items():
+            summary.append({"File": fname, "Pages": res["pages"],
+                            "Pages with rates": res["scanned"],
+                            "Rate classes found": len(res["rates"]),
+                            "Company (detected)": next((n for n, k in zip(names, keys)
+                                                        if k == res["company"]), "—")})
+        st.dataframe(pd.DataFrame(summary), hide_index=True, width="stretch")
+        for fname, res in filings.items():
+            guess = keys.index(res["company"]) if res["company"] in keys else None
+            label = (f"{fname} — {len(res['rates'])} rate class(es)"
+                     + (f" — {names[guess].split(' (')[0]}" if guess is not None else ""))
+            with st.expander(label, expanded=len(filings) <= 2):
+                ci = st.selectbox("Company on the page", range(len(names)),
                                   index=guess, format_func=lambda i: names[i],
-                                  placeholder="Choose company…",
-                                  key=f"mg_co_{fname}", label_visibility="collapsed")
+                                  placeholder="Choose company…", key=f"mg_co_{fname}")
                 if not res["rates"]:
                     st.warning("No GAF/LDAF rates recognised in this PDF.")
                     continue
                 df = pd.DataFrame([{"Use": True, **{k: r[k] for k in (
-                    "Rate class (filing)", "Billing Unit", "GAF", "LDAF", "Block",
-                    "Source")}} for r in res["rates"]])
+                    "Rate class (filing)", "Billing Unit", "GAF", "LDAF", "Source",
+                    "Other values")}} for r in res["rates"]])
                 ed = st.data_editor(
                     df, hide_index=True, width="stretch", key=f"mg_rates_{fname}_{month}",
-                    disabled=["Rate class (filing)", "Block", "Source"],
+                    disabled=["Rate class (filing)", "Source", "Other values"],
                     column_config={"GAF": st.column_config.NumberColumn(format="%.4f"),
-                                   "LDAF": st.column_config.NumberColumn(format="%.4f")})
+                                   "LDAF": st.column_config.NumberColumn(format="%.4f"),
+                                   "Other values": st.column_config.TextColumn(
+                                       help="Other values for this class seen elsewhere "
+                                            "in the file (other scenarios or the current "
+                                            "rate). Check if they differ.")})
+                conflicts = [r for r in res["rates"] if r["Other values"]]
+                if conflicts:
+                    st.caption(f"{len(conflicts)} class(es) have other values elsewhere "
+                               "in the file — see 'Other values'.")
                 if ci is None:
                     st.caption("Choose the company to use these rates.")
                     continue
-                use = []
                 for r, (_, e) in zip(res["rates"], ed.iterrows()):
-                    if e["Use"]:
-                        use.append({**r, "GAF": None if pd.isna(e["GAF"]) else e["GAF"],
-                                    "LDAF": None if pd.isna(e["LDAF"]) else e["LDAF"],
-                                    "Billing Unit": e["Billing Unit"]})
-                assigned.setdefault(ci, []).extend(use)
+                    if not e["Use"]:
+                        continue
+                    row = {**r, "_file": fname, "Billing Unit": e["Billing Unit"]}
+                    for kind in ("GAF", "LDAF"):
+                        v = None if pd.isna(e[kind]) else float(e[kind])
+                        if fmt_rate(v) != fmt_rate(r[kind]):
+                            row[f"rank_{kind}"] = 99          # typed by hand
+                        row[kind] = v
+                    collected.setdefault(ci, []).append(row)
+    assigned = {ci: merge_rates(rows) for ci, rows in collected.items()}
 
     # ---- 3. Build the section --------------------------------------------
     st.subheader("3 · Section as it will appear on the webpage" if filings
