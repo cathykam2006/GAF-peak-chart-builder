@@ -41,3 +41,23 @@ Calculated: % change in GAF, bill change, % bill change, change due to GAF only
 (ΔGAF × usage), LDAF total-bill change (usage × ΔLDAF).
 
 Entered by hand: bill change using prior LDAFs, reduced and off-peak LDAFs.
+
+## Mass.gov rate page (second page in the sidebar)
+
+Builds the next section of
+[Information on Gas Supply and Delivery Charges](https://www.mass.gov/info-details/information-on-gas-supply-and-delivery-charges).
+
+1. **Pull the posted rates**: read live from mass.gov. If the site blocks the
+   request, drop a saved copy of the page (.html) or paste text copied from it.
+   Any posted section can be viewed or exported as CSV, including the full history.
+2. **Start the next revision**: pick a base section. The next title and
+   effective dates are suggested, e.g. after *Off-Peak/Summer 2026 Rates
+   Revision 3 (Effective 10/1/26 through 10/31/26)* it suggests *Peak/Winter
+   2026-2027 Rates (Effective 11/1/26 through 11/30/26)*. All of these can be edited.
+3. **Fill in new values**:
+   - from a Peak chart Part: the proposed R-3 GAF and LDAF go into each
+     company's residential heating (or All Residential) row. The new GAF can also
+     be applied to other classes that shared the old residential heating GAF.
+   - or by editing each company's table and notes directly.
+   Companies whose values changed are marked **REVISED** automatically (can be overridden).
+4. **Export** in the page's format: plain text, HTML for the web editor, or CSV.

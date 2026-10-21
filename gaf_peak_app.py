@@ -445,243 +445,257 @@ def blank_part(name):
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="GAF Peak Chart Builder", layout="wide")
-st.title("GAF Peak Chart Builder — R-3 Residential Heating")
-st.caption("Created by Cathy Kam")
+def peak_chart_page():
+    global PCOLS, LCOLS, FIELD_LABELS
+    st.title("GAF Peak Chart Builder — R-3 Residential Heating")
+    st.caption("Created by Cathy Kam")
 
-with st.sidebar:
-    st.header("Period labels")
-    prior = st.text_input("Prior peak period", "2025/26")
-    proposed = st.text_input("Proposed peak period", "2026/27")
-    prior_short = st.text_input("Prior (short)", "25/26")
-    proposed_short = st.text_input("Proposed (short)", "26/27")
-    ldaf_date = st.text_input("Current LDAF effective date", "11/1/25")
-    st.divider()
-    st.markdown(
-        "**Pulled from each R-3 section**\n"
-        "- Usage = peak-period therms ÷ 6\n"
-        "- GAF = Cost of Gas Adjustment row in the Current block vs the "
-        "Proposed block (usage-weighted if it varies Nov–Apr)\n"
-        "- Bills = peak-period bill total ÷ 6 (plain / without-discount rows)\n"
-        "- LDAF = Total LDAC row\n\n"
-        "**Calculated**\n"
-        "- % change GAF = (Proposed − Prior) ÷ Prior\n"
-        "- Bill change = Proposed − Prior bill\n"
-        "- Change due to GAF only = ΔGAF × usage\n"
-        "- LDAF total-bill change = usage × ΔLDAF")
+    with st.sidebar:
+        st.header("Period labels")
+        prior = st.text_input("Prior peak period", "2025/26")
+        proposed = st.text_input("Proposed peak period", "2026/27")
+        prior_short = st.text_input("Prior (short)", "25/26")
+        proposed_short = st.text_input("Proposed (short)", "26/27")
+        ldaf_date = st.text_input("Current LDAF effective date", "11/1/25")
+        st.divider()
+        st.markdown(
+            "**Pulled from each R-3 section**\n"
+            "- Usage = peak-period therms ÷ 6\n"
+            "- GAF = Cost of Gas Adjustment row in the Current block vs the "
+            "Proposed block (usage-weighted if it varies Nov–Apr)\n"
+            "- Bills = peak-period bill total ÷ 6 (plain / without-discount rows)\n"
+            "- LDAF = Total LDAC row\n\n"
+            "**Calculated**\n"
+            "- % change GAF = (Proposed − Prior) ÷ Prior\n"
+            "- Bill change = Proposed − Prior bill\n"
+            "- Change due to GAF only = ΔGAF × usage\n"
+            "- LDAF total-bill change = usage × ΔLDAF")
 
-PCOLS = peak_columns(prior, proposed, ldaf_date)
-LCOLS = ldaf_columns(prior_short, proposed_short, ldaf_date)
-FIELD_LABELS = {**PCOLS, **LCOLS}
+    PCOLS = peak_columns(prior, proposed, ldaf_date)
+    LCOLS = ldaf_columns(prior_short, proposed_short, ldaf_date)
+    FIELD_LABELS = {**PCOLS, **LCOLS}
 
-ss = st.session_state
-ss.setdefault("parts", [blank_part("Part 1")])
-ss.setdefault("sections", [])      # every scenario found, across files
+    ss = st.session_state
+    ss.setdefault("parts", [blank_part("Part 1")])
+    ss.setdefault("sections", [])      # every scenario found, across files
 
-# ---- 1. Drag and drop -----------------------------------------------------
-st.subheader("1 · Drop filings")
-files = st.file_uploader(
-    "Drag and drop typical-bill schedules (PDF or Excel). Every R-3 page or "
-    "sheet in each file is read; each scenario on it becomes a section.",
-    type=["pdf", "xlsx", "xlsm", "xls", "csv", "txt"],
-    accept_multiple_files=True)
+    # ---- 1. Drag and drop -----------------------------------------------------
+    st.subheader("1 · Drop filings")
+    files = st.file_uploader(
+        "Drag and drop typical-bill schedules (PDF or Excel). Every R-3 page or "
+        "sheet in each file is read; each scenario on it becomes a section.",
+        type=["pdf", "xlsx", "xlsm", "xls", "csv", "txt"],
+        accept_multiple_files=True)
 
-if files:
-    assign = {}
-    for f in files:
-        pages = read_pages(f.name, f.getvalue())
-        comp = guess_company(f.name, pages)
-        r3 = [p for p in pages if is_r3_page(p[1])]
-        c1, c2 = st.columns([3, 2])
-        c1.write(f"**{f.name}** — {len(pages)} page(s), "
-                 f"{len(r3)} R-3 page(s): {', '.join(p[0] for p in r3) or 'none'}")
-        if not r3:
-            c1.caption("No R-3 heading found; every page will be tried.")
-        assign[f.name] = (c2.selectbox(
-            "Company", ["— skip —"] + DATA_COMPANIES,
-            index=DATA_COMPANIES.index(comp) + 1 if comp else 0,
-            key=f"co_{f.name}", label_visibility="collapsed"), r3 or pages)
+    if files:
+        assign = {}
+        for f in files:
+            pages = read_pages(f.name, f.getvalue())
+            comp = guess_company(f.name, pages)
+            r3 = [p for p in pages if is_r3_page(p[1])]
+            c1, c2 = st.columns([3, 2])
+            c1.write(f"**{f.name}** — {len(pages)} page(s), "
+                     f"{len(r3)} R-3 page(s): {', '.join(p[0] for p in r3) or 'none'}")
+            if not r3:
+                c1.caption("No R-3 heading found; every page will be tried.")
+            assign[f.name] = (c2.selectbox(
+                "Company", ["— skip —"] + DATA_COMPANIES,
+                index=DATA_COMPANIES.index(comp) + 1 if comp else 0,
+                key=f"co_{f.name}", label_visibility="collapsed"), r3 or pages)
 
-    if st.button("Identify sections", type="primary"):
-        sections = []
-        for fname, (comp, pages) in assign.items():
-            if comp == "— skip —":
-                continue
-            n_in_file = 0
-            for plabel, lines in pages:
-                parsed = parse_page(lines)
-                for k, sc in enumerate(parsed["scenarios"], 1):
-                    if not sc["values"]:
-                        continue
-                    n_in_file += 1
-                    name = describe(parsed["title"]) or plabel
-                    if len(parsed["scenarios"]) > 1:
-                        name += f" — scenario {k}: {sc['proposed_basis']}"
-                    sections.append({
-                        "id": f"{fname}|{plabel}|{k}", "company": comp,
-                        "file": fname, "page": plabel, "name": name,
-                        "title": parsed["title"],
-                        "comparisons": parsed["comparisons"],
-                        "footnotes": parsed["footnotes"], **sc,
-                        "part": n_in_file,           # default: n-th scenario -> Part n
-                    })
-        ss.sections = sections
-        need = max([s["part"] for s in sections], default=1)
-        while len(ss.parts) < need:
-            ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
-        st.rerun()
-
-# ---- 2. Sections found -------------------------------------------------
-if ss.sections:
-    st.subheader("2 · Sections identified — what each one compares")
-    st.caption("Check the basis of each section, then choose which Part "
-               "(chart) it goes into. Sections that compare different things "
-               "should go into different Parts.")
-    part_opts = ["skip"] + [f"Part {i + 1}" for i in range(len(ss.parts))] \
-        + ["+ new Part"]
-    by_co = {}
-    for s in ss.sections:
-        by_co.setdefault(s["company"], []).append(s)
-    for comp, secs in by_co.items():
-        if len(secs) > 1:
-            st.warning(f"{comp}: {len(secs)} sections found — they compare "
-                       "different scenarios; confirm which Part each belongs in.")
-        for s in secs:
-            with st.container(border=True):
-                top = st.columns([4, 1])
-                top[0].markdown(f"**{comp}** · {s['name']}  \n"
-                                f"`{s['file']}` {s['page']}")
-                default = f"Part {s['part']}" if s["part"] <= len(ss.parts) else "skip"
-                s["part_choice"] = top[1].selectbox(
-                    "Part", part_opts, index=part_opts.index(default),
-                    key=f"part_{s['id']}")
-                if s["compared_line"]:
-                    st.markdown(f"#### 🔎 {s['compared_line']}")
-                st.markdown(
-                    f"- **Compared from (current basis):** {s['current_basis']}\n"
-                    f"- **Compared to (proposed basis):** {s['proposed_basis']}\n"
-                    f"- **Page title:** {' / '.join(s['title']) or '—'}\n"
-                    + (f"- **Comparisons on page:** {'; '.join(s['comparisons'])}\n"
-                       if s["comparisons"] else "")
-                    + (f"- **Footnotes:** {' '.join(s['footnotes'])}\n"
-                       if s["footnotes"] else ""))
-                vt = pd.DataFrame([
-                    {"Field": FIELD_LABELS.get(k, k), "Value": v,
-                     "Source": s["sources"].get(k, "")}
-                    for k, v in s["values"].items()])
-                st.dataframe(vt, hide_index=True, width="stretch")
-                for n in s["notes"]:
-                    st.info(n)
-
-    if st.button("Fill Parts from sections", type="primary"):
-        for s in ss.sections:
-            ch = s.get("part_choice", "skip")
-            if ch == "skip":
-                continue
-            if ch == "+ new Part":
-                ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
-                idx = len(ss.parts) - 1
-            else:
-                idx = int(ch.split()[1]) - 1
-            part = ss.parts[idx]
-            peak = part["peak"].set_index("Company")
-            ldaf = part["ldaf"].set_index("Company")
-            for k, v in s["values"].items():
-                if v is None:
+        if st.button("Identify sections", type="primary"):
+            sections = []
+            for fname, (comp, pages) in assign.items():
+                if comp == "— skip —":
                     continue
-                (peak if k in PEAK_INPUTS else ldaf).at[s["company"], k] = v
-            part["peak"], part["ldaf"] = peak.reset_index(), ldaf.reset_index()
-            part["notes"][s["company"]] = {
-                NOTE_COLS[0]: s["name"],
-                NOTE_COLS[1]: s["current_basis"],
-                NOTE_COLS[2]: (s["proposed_basis"]
-                               + (f" — {s['compared_line']}" if s["compared_line"] else "")),
-                NOTE_COLS[3]: f"{s['file']} {s['page']}",
-            }
-            if part["name"] == f"Part {idx + 1}":
-                part["name"] = f"Part {idx + 1} — {s['name']}"
-            part["ver"] += 1
+                n_in_file = 0
+                for plabel, lines in pages:
+                    parsed = parse_page(lines)
+                    for k, sc in enumerate(parsed["scenarios"], 1):
+                        if not sc["values"]:
+                            continue
+                        n_in_file += 1
+                        name = describe(parsed["title"]) or plabel
+                        if len(parsed["scenarios"]) > 1:
+                            name += f" — scenario {k}: {sc['proposed_basis']}"
+                        sections.append({
+                            "id": f"{fname}|{plabel}|{k}", "company": comp,
+                            "file": fname, "page": plabel, "name": name,
+                            "title": parsed["title"],
+                            "comparisons": parsed["comparisons"],
+                            "footnotes": parsed["footnotes"], **sc,
+                            "part": n_in_file,           # default: n-th scenario -> Part n
+                        })
+            ss.sections = sections
+            need = max([s["part"] for s in sections], default=1)
+            while len(ss.parts) < need:
+                ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
+            st.rerun()
+
+    # ---- 2. Sections found -------------------------------------------------
+    if ss.sections:
+        st.subheader("2 · Sections identified — what each one compares")
+        st.caption("Check the basis of each section, then choose which Part "
+                   "(chart) it goes into. Sections that compare different things "
+                   "should go into different Parts.")
+        part_opts = ["skip"] + [f"Part {i + 1}" for i in range(len(ss.parts))] \
+            + ["+ new Part"]
+        by_co = {}
+        for s in ss.sections:
+            by_co.setdefault(s["company"], []).append(s)
+        for comp, secs in by_co.items():
+            if len(secs) > 1:
+                st.warning(f"{comp}: {len(secs)} sections found — they compare "
+                           "different scenarios; confirm which Part each belongs in.")
+            for s in secs:
+                with st.container(border=True):
+                    top = st.columns([4, 1])
+                    top[0].markdown(f"**{comp}** · {s['name']}  \n"
+                                    f"`{s['file']}` {s['page']}")
+                    default = f"Part {s['part']}" if s["part"] <= len(ss.parts) else "skip"
+                    s["part_choice"] = top[1].selectbox(
+                        "Part", part_opts, index=part_opts.index(default),
+                        key=f"part_{s['id']}")
+                    if s["compared_line"]:
+                        st.markdown(f"#### 🔎 {s['compared_line']}")
+                    st.markdown(
+                        f"- **Compared from (current basis):** {s['current_basis']}\n"
+                        f"- **Compared to (proposed basis):** {s['proposed_basis']}\n"
+                        f"- **Page title:** {' / '.join(s['title']) or '—'}\n"
+                        + (f"- **Comparisons on page:** {'; '.join(s['comparisons'])}\n"
+                           if s["comparisons"] else "")
+                        + (f"- **Footnotes:** {' '.join(s['footnotes'])}\n"
+                           if s["footnotes"] else ""))
+                    vt = pd.DataFrame([
+                        {"Field": FIELD_LABELS.get(k, k), "Value": v,
+                         "Source": s["sources"].get(k, "")}
+                        for k, v in s["values"].items()])
+                    st.dataframe(vt, hide_index=True, width="stretch")
+                    for n in s["notes"]:
+                        st.info(n)
+
+        if st.button("Fill Parts from sections", type="primary"):
+            for s in ss.sections:
+                ch = s.get("part_choice", "skip")
+                if ch == "skip":
+                    continue
+                if ch == "+ new Part":
+                    ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
+                    idx = len(ss.parts) - 1
+                else:
+                    idx = int(ch.split()[1]) - 1
+                part = ss.parts[idx]
+                peak = part["peak"].set_index("Company")
+                ldaf = part["ldaf"].set_index("Company")
+                for k, v in s["values"].items():
+                    if v is None:
+                        continue
+                    (peak if k in PEAK_INPUTS else ldaf).at[s["company"], k] = v
+                part["peak"], part["ldaf"] = peak.reset_index(), ldaf.reset_index()
+                part["notes"][s["company"]] = {
+                    NOTE_COLS[0]: s["name"],
+                    NOTE_COLS[1]: s["current_basis"],
+                    NOTE_COLS[2]: (s["proposed_basis"]
+                                   + (f" — {s['compared_line']}" if s["compared_line"] else "")),
+                    NOTE_COLS[3]: f"{s['file']} {s['page']}",
+                }
+                if part["name"] == f"Part {idx + 1}":
+                    part["name"] = f"Part {idx + 1} — {s['name']}"
+                part["ver"] += 1
+            st.rerun()
+
+    # ---- 3. Parts ----------------------------------------------------------
+    st.subheader("3 · Parts (one chart each)")
+    if st.button("+ Add empty Part"):
+        ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
         st.rerun()
 
-# ---- 3. Parts ----------------------------------------------------------
-st.subheader("3 · Parts (one chart each)")
-if st.button("+ Add empty Part"):
-    ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
-    st.rerun()
+    exports = []
+    tabs = st.tabs([p["name"][:40] for p in ss.parts])
+    pfmt = {PCOLS[k]: "{:.4f}" for k in ["prior_gaf", "prop_gaf"]}
+    pfmt.update({PCOLS[k]: "{:.2%}" for k in ["pct_gaf", "pct_bill"]})
+    pfmt.update({PCOLS[k]: "${:,.2f}" for k in ["prior_bill", "prop_bill", "chg_bill",
+                                                 "chg_gaf_only", "chg_old_ldaf"]})
+    pfmt[PCOLS["usage"]] = "{:.2f}"
+    lfmt = {LCOLS[k]: "{:.4f}" for k in ["cur_ldaf", "reduced_ldaf",
+                                         "offpeak_ldaf", "prop_ldaf"]}
+    lfmt[LCOLS["pct_ldaf"]] = "{:.2%}"
+    lfmt.update({LCOLS[k]: "${:,.2f}" for k in ["prior_winter_bill",
+                                                 "prop_winter_bill", "chg_total_bill"]})
 
-exports = []
-tabs = st.tabs([p["name"][:40] for p in ss.parts])
-pfmt = {PCOLS[k]: "{:.4f}" for k in ["prior_gaf", "prop_gaf"]}
-pfmt.update({PCOLS[k]: "{:.2%}" for k in ["pct_gaf", "pct_bill"]})
-pfmt.update({PCOLS[k]: "${:,.2f}" for k in ["prior_bill", "prop_bill", "chg_bill",
-                                             "chg_gaf_only", "chg_old_ldaf"]})
-pfmt[PCOLS["usage"]] = "{:.2f}"
-lfmt = {LCOLS[k]: "{:.4f}" for k in ["cur_ldaf", "reduced_ldaf",
-                                     "offpeak_ldaf", "prop_ldaf"]}
-lfmt[LCOLS["pct_ldaf"]] = "{:.2%}"
-lfmt.update({LCOLS[k]: "${:,.2f}" for k in ["prior_winter_bill",
-                                             "prop_winter_bill", "chg_total_bill"]})
+    for i, (tab, part) in enumerate(zip(tabs, ss.parts)):
+        with tab:
+            part["name"] = st.text_input("Part name (goes in the CSV)", part["name"],
+                                         key=f"pname_{i}")
+            st.markdown("**Peak chart** — edit inputs here")
+            cfg = {"Company": st.column_config.TextColumn(disabled=True)}
+            for k in PEAK_INPUTS:
+                f = "%.4f" if "gaf" in k else ("%.2f" if k == "usage" else "$%.2f")
+                cfg[k] = st.column_config.NumberColumn(PCOLS[k], format=f)
+            peak_in = st.data_editor(part["peak"], column_config=cfg, hide_index=True,
+                                     width="stretch",
+                                     key=f"peak_{i}_{part['ver']}")
+            peak_calc = compute_peak(peak_in)
+            peak_out = build_export(peak_calc, PCOLS, PEAK_ORDER,
+                                    avg_cols=[k for k in PEAK_ORDER if k != "usage"],
+                                    notes=part["notes"])
+            st.dataframe(peak_out.style.format(pfmt, na_rep=""), hide_index=True,
+                         width="stretch")
 
-for i, (tab, part) in enumerate(zip(tabs, ss.parts)):
-    with tab:
-        part["name"] = st.text_input("Part name (goes in the CSV)", part["name"],
-                                     key=f"pname_{i}")
-        st.markdown("**Peak chart** — edit inputs here")
-        cfg = {"Company": st.column_config.TextColumn(disabled=True)}
-        for k in PEAK_INPUTS:
-            f = "%.4f" if "gaf" in k else ("%.2f" if k == "usage" else "$%.2f")
-            cfg[k] = st.column_config.NumberColumn(PCOLS[k], format=f)
-        peak_in = st.data_editor(part["peak"], column_config=cfg, hide_index=True,
-                                 width="stretch",
-                                 key=f"peak_{i}_{part['ver']}")
-        peak_calc = compute_peak(peak_in)
-        peak_out = build_export(peak_calc, PCOLS, PEAK_ORDER,
-                                avg_cols=[k for k in PEAK_ORDER if k != "usage"],
-                                notes=part["notes"])
-        st.dataframe(peak_out.style.format(pfmt, na_rep=""), hide_index=True,
-                     width="stretch")
+            st.markdown("**Residential-Heating LDAF**")
+            lcfg = {"Company": st.column_config.TextColumn(disabled=True)}
+            for k in LDAF_INPUTS:
+                lcfg[k] = st.column_config.NumberColumn(
+                    LCOLS[k], format="$%.2f" if "bill" in k else "%.4f")
+            ldaf_in = st.data_editor(part["ldaf"], column_config=lcfg, hide_index=True,
+                                     width="stretch",
+                                     key=f"ldaf_{i}_{part['ver']}")
+            ldaf_out = build_export(compute_ldaf(ldaf_in, peak_calc["usage"]),
+                                    LCOLS, LDAF_ORDER, avg_cols=[])
+            st.dataframe(ldaf_out.style.format(lfmt, na_rep=""), hide_index=True,
+                         width="stretch")
 
-        st.markdown("**Residential-Heating LDAF**")
-        lcfg = {"Company": st.column_config.TextColumn(disabled=True)}
-        for k in LDAF_INPUTS:
-            lcfg[k] = st.column_config.NumberColumn(
-                LCOLS[k], format="$%.2f" if "bill" in k else "%.4f")
-        ldaf_in = st.data_editor(part["ldaf"], column_config=lcfg, hide_index=True,
-                                 width="stretch",
-                                 key=f"ldaf_{i}_{part['ver']}")
-        ldaf_out = build_export(compute_ldaf(ldaf_in, peak_calc["usage"]),
-                                LCOLS, LDAF_ORDER, avg_cols=[])
-        st.dataframe(ldaf_out.style.format(lfmt, na_rep=""), hide_index=True,
-                     width="stretch")
+            stamp = proposed_short.replace("/", "-")
+            safe = re.sub(r"[^A-Za-z0-9]+", "_", part["name"])[:40].strip("_")
+            part_csv = (f"{part['name']}\n" + peak_out.to_csv(index=False)
+                        + "\n,Residential-Heating LDAF\n" + ldaf_out.to_csv(index=False))
+            st.download_button(f"Download {part['name'][:30]} CSV",
+                               part_csv.encode("utf-8-sig"),
+                               file_name=f"{stamp}_PEAK_{safe}.csv", mime="text/csv",
+                               key=f"dl_{i}")
+            exports.append(part_csv)
 
-        stamp = proposed_short.replace("/", "-")
-        safe = re.sub(r"[^A-Za-z0-9]+", "_", part["name"])[:40].strip("_")
-        part_csv = (f"{part['name']}\n" + peak_out.to_csv(index=False)
-                    + "\n,Residential-Heating LDAF\n" + ldaf_out.to_csv(index=False))
-        st.download_button(f"Download {part['name'][:30]} CSV",
-                           part_csv.encode("utf-8-sig"),
-                           file_name=f"{stamp}_PEAK_{safe}.csv", mime="text/csv",
-                           key=f"dl_{i}")
-        exports.append(part_csv)
+            # keep edits without resetting the editor on every rerun
+            part["peak_live"], part["ldaf_live"] = peak_in, ldaf_in
 
-        # keep edits without resetting the editor on every rerun
-        part["peak_live"], part["ldaf_live"] = peak_in, ldaf_in
+    # ---- 4. Export all -----------------------------------------------------
+    st.subheader("4 · Export")
+    st.download_button("Download all Parts in one CSV",
+                       "\n\n".join(exports).encode("utf-8-sig"),
+                       file_name=f"{proposed_short.replace('/', '-')}_PEAK_all_parts.csv",
+                       mime="text/csv", type="primary")
 
-# ---- 4. Export all -----------------------------------------------------
-st.subheader("4 · Export")
-st.download_button("Download all Parts in one CSV",
-                   "\n\n".join(exports).encode("utf-8-sig"),
-                   file_name=f"{proposed_short.replace('/', '-')}_PEAK_all_parts.csv",
-                   mime="text/csv", type="primary")
+    # Commit live edits into the base tables before the next fill so manual edits
+    # survive "Fill Parts from sections".
+    for part in ss.parts:
+        if "peak_live" in part:
+            part["peak"] = part.pop("peak_live")
+            part["ldaf"] = part.pop("ldaf_live")
 
-# Commit live edits into the base tables before the next fill so manual edits
-# survive "Fill Parts from sections".
-for part in ss.parts:
-    if "peak_live" in part:
-        part["peak"] = part.pop("peak_live")
-        part["ldaf"] = part.pop("ldaf_live")
+    if st.button("Clear everything"):
+        for k in [k for k in ss.keys() if not str(k).startswith("mg_")]:
+            del ss[k]
+        st.rerun()
 
-if st.button("Clear everything"):
-    for k in list(ss.keys()):
-        del ss[k]
-    st.rerun()
+
+# ---------------------------------------------------------------------------
+# Navigation
+# ---------------------------------------------------------------------------
+from massgov_page import massgov_page  # noqa: E402
+
+st.set_page_config(page_title="GAF Peak Chart Builder", layout="wide")
+st.navigation([
+    st.Page(peak_chart_page, title="Peak chart (R-3)", icon="📊", default=True),
+    st.Page(massgov_page, title="Mass.gov rate page", icon="🌐",
+            url_path="massgov"),
+]).run()

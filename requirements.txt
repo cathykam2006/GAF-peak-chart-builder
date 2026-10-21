@@ -2,3 +2,5 @@ streamlit>=1.40
 pandas
 pdfplumber
 openpyxl
+requests
+beautifulsoup4
