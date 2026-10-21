@@ -80,3 +80,25 @@ ready to be transferred to the webpage.
   columns (e.g. Form IIA) > rate table > typical-bill schedule that proposes the rate
   > other schedules. Other values found are listed beside each class. When several
   files cover the same company they are combined the same way; hand edits win.
+
+## Latest rates across several filings (Peak chart page)
+
+After **Identify sections**, step 2 shows, for each company:
+
+- each file's type (CGAC / LDAC), Revised flag and filing date (taken from a
+  "Filed:" line, or from another filing's reference such as
+  "(LDAC)Revised filed on August 27, 2026"), plus any R-3 values in a summary table (Form IIA);
+- the **latest proposed GAF and LDAF**: GAF from the cost-of-gas (CGAC) filing,
+  LDAF from the LDAC filing, among scenarios that actually propose the rate,
+  then the most recently filed and Revised documents, summary tables over
+  typical-bill pages. Other proposed values are listed so they can be checked;
+- the supporting values: average prior peak GAF (basis "CGA is average rate"),
+  current peak LDAF (basis "LDAF effective November 1"), off-peak LDAF, and the
+  bills from the scenario where only the GAF and LDAF change;
+- **every scenario the company filed** side by side (basis, filing date, GAF, peak
+  and off-peak LDAF, bill), flagged where it differs from the latest rate.
+
+**Build chart from latest rates** fills one Part with the peak chart, the
+Residential-Heating LDAF table and the **Alternative Residential LDAF** table
+(filled from illustrative / re-allocation scenarios). Individual sections can
+still be charted as separate Parts from the expander below.

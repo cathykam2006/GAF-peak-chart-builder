@@ -310,7 +310,10 @@ def parse_page(lines):
         ci = max([i for i in range(pi) if blocks[i]["kind"] == "current"],
                  default=0)
         cur, prop = blocks[ci], blocks[pi]
-        vals, src, notes = {}, {}, []
+        if not prop["rows"]:          # e.g. a footer "Proposed Rates Effective ..." line
+            continue
+        vals, src, notes, extra = {}, {}, [], {}
+        may = order.index("may") if "may" in order else None
         if usage is not None:
             vals["usage"], src["usage"] = usage, usage_src
         for key, blk, tag in (("prior_gaf", cur, "Current"),
@@ -325,6 +328,14 @@ def parse_page(lines):
             if r:
                 vals[key] = peak_value(r[1], order, is_rate=True)
                 src[key] = f"{tag} block → {r[0]}"
+                if may is not None and len(r[1]) > may:
+                    extra[key + "_offpeak"] = r[1][may]
+        for key, blk in (("prior_gaf", cur), ("prop_gaf", prop)):
+            r = find(blk["rows"], GAF_RE)
+            if r and may is not None and len(r[1]) > may:
+                extra[key + "_offpeak"] = r[1][may]
+        if usage_row and len(usage_row[1]) >= 15:
+            extra["usage_offpeak"] = r2(usage_row[1][14] / 6)
         # bills: pair the n-th proposed bill with the n-th scenario
         cb = cur_bills[min(n, len(cur_bills) - 1)] if cur_bills else None
         nb = None
@@ -358,7 +369,8 @@ def parse_page(lines):
             "compared_line": " / ".join(compared),
             "current_basis": cur["header"],
             "proposed_basis": prop["header"],
-            "values": vals, "sources": src, "notes": notes,
+            "values": vals, "sources": src, "notes": notes, "extra": extra,
+            "page_text": " ".join(lines),
         })
     return {"title": title, "comparisons": comparisons, "footnotes": footnotes,
             "scenarios": scenarios}
@@ -434,6 +446,38 @@ NOTE_COLS = ["Section / scenario", "Compared from (current basis)",
              "Compared to (proposed basis)", "Source"]
 
 
+ALT_INPUTS = ["cur_ldaf", "offpeak_ldaf", "alt_peak_ldaf", "alt_offpeak_ldaf",
+              "usage_offpeak"]
+ALT_ORDER = ["cur_ldaf", "offpeak_ldaf", "alt_peak_ldaf", "alt_offpeak_ldaf", "pct_alt",
+             "chg_alt_peak", "chg_alt_off", "usage_offpeak"]
+
+
+def alt_columns(prior_short, proposed_short, ldaf_date):
+    return {"cur_ldaf": f" {prior_short} LDAF ({ldaf_date})",
+            "offpeak_ldaf": "Revised LDAF (Off-Peak)",
+            "alt_peak_ldaf": f" Alternative {proposed_short} Peak LDAF",
+            "alt_offpeak_ldaf": " Alternative LDAF Off-Peak",
+            "pct_alt": "% Change from Peak LDAF",
+            "chg_alt_peak": " Change in Bill Peak LDAF vs. alternative",
+            "chg_alt_off": " Change in Bill off-peak LDAF vs. alternative off-peak LDAF",
+            "usage_offpeak": "Off-peak avg monthly usage (therms)"}
+
+
+def compute_alt(df, usage):
+    d = df.copy()
+    for c in ALT_INPUTS:
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d["pct_alt"] = [_div(a - c, c) for c, a in zip(d.cur_ldaf, d.alt_peak_ldaf)]
+    d["chg_alt_peak"] = usage.values * (d.alt_peak_ldaf - d.cur_ldaf)
+    d["chg_alt_off"] = d.usage_offpeak * (d.alt_offpeak_ldaf - d.offpeak_ldaf)
+    return d
+
+
+def blank_alt():
+    return pd.DataFrame([{"Company": c, **{k: None for k in ALT_INPUTS}}
+                         for c in DATA_COMPANIES]).astype({k: "float64" for k in ALT_INPUTS})
+
+
 def blank_part(name):
     peak = pd.DataFrame([{"Company": c, **{k: None for k in PEAK_INPUTS}}
                          for c in DATA_COMPANIES]).astype(
@@ -441,7 +485,8 @@ def blank_part(name):
     ldaf = pd.DataFrame([{"Company": c, **{k: None for k in LDAF_INPUTS}}
                          for c in DATA_COMPANIES]).astype(
         {k: "float64" for k in LDAF_INPUTS})
-    return {"name": name, "peak": peak, "ldaf": ldaf, "notes": {}, "ver": 0}
+    return {"name": name, "peak": peak, "ldaf": ldaf, "alt": blank_alt(), "notes": {},
+            "ver": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +520,7 @@ def peak_chart_page():
 
     PCOLS = peak_columns(prior, proposed, ldaf_date)
     LCOLS = ldaf_columns(prior_short, proposed_short, ldaf_date)
+    ACOLS = alt_columns(prior_short, proposed_short, ldaf_date)
     FIELD_LABELS = {**PCOLS, **LCOLS}
 
     ss = st.session_state
@@ -509,14 +555,17 @@ def peak_chart_page():
             assign[f.name] = (c2.selectbox(
                 "Company", ["— skip —"] + DATA_COMPANIES,
                 index=DATA_COMPANIES.index(comp) + 1 if comp else 0,
-                key=f"co_{f.name}", label_visibility="collapsed"), r3 or pages)
+                key=f"co_{f.name}", label_visibility="collapsed"), r3 or pages, pages)
         bar.empty()
 
         if st.button("Identify sections", type="primary"):
             sections = []
-            for fname, (comp, pages) in assign.items():
+            import latest_rates as lr
+            metas = {}
+            for fname, (comp, pages, all_pages) in assign.items():
                 if comp == "— skip —":
                     continue
+                metas[fname] = lr.file_meta(fname, all_pages)
                 n_in_file = 0
                 for plabel, lines in pages:
                     parsed = parse_page(lines)
@@ -533,85 +582,182 @@ def peak_chart_page():
                             "title": parsed["title"],
                             "comparisons": parsed["comparisons"],
                             "footnotes": parsed["footnotes"], **sc,
-                            "part": n_in_file,           # default: n-th scenario -> Part n
+                            "part": 0,                   # manual assignment only
                         })
             ss.sections = sections
-            need = max([s["part"] for s in sections], default=1)
-            while len(ss.parts) < need:
-                ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
+            ss.file_meta = lr.resolve_dates(metas)
             st.rerun()
 
-    # ---- 2. Sections found -------------------------------------------------
+    # ---- 2. Latest rates and scenario comparison -------------------------
     if ss.sections:
-        st.subheader("2 · Sections identified — what each one compares")
-        st.caption("Check the basis of each section, then choose which Part "
-                   "(chart) it goes into. Sections that compare different things "
-                   "should go into different Parts.")
-        part_opts = ["skip"] + [f"Part {i + 1}" for i in range(len(ss.parts))] \
-            + ["+ new Part"]
+        import latest_rates as lr
+        metas = ss.get("file_meta", {})
+        st.subheader("2 · Latest GAF / LDAF and scenario comparison")
+        if metas:
+            st.dataframe(pd.DataFrame([{
+                "File": n, "Filing type": m["subject"] or "—",
+                "Revised": "Yes" if m["revised"] else "",
+                "Filed": (m["filed"].strftime("%m/%d/%Y") + (" (from another filing's "
+                          "reference)" if m.get("filed_inferred") else "")) if m["filed"] else "—",
+                "Summary table (R-3)": ", ".join(f"{k} {v[0]:.4f}" for k, v in
+                                                 m["summary"].items())}
+                for n, m in metas.items()]), hide_index=True, width="stretch")
+        st.caption("Latest rate = GAF from the cost-of-gas (CGAC) filing, LDAF from the "
+                   "LDAC filing, among scenarios that actually propose the rate; then the "
+                   "most recently filed and Revised documents; summary tables (Form IIA) "
+                   "over typical-bill pages. Illustrative / re-allocation scenarios go to "
+                   "the Alternative LDAF table, not the chart.")
         by_co = {}
         for s in ss.sections:
             by_co.setdefault(s["company"], []).append(s)
+        resolved = {}
         for comp, secs in by_co.items():
-            if len(secs) > 1:
-                st.warning(f"{comp}: {len(secs)} sections found — they compare "
-                           "different scenarios; confirm which Part each belongs in.")
-            for s in secs:
-                with st.container(border=True):
-                    top = st.columns([4, 1])
-                    top[0].markdown(f"**{comp}** · {s['name']}  \n"
-                                    f"`{s['file']}` {s['page']}")
-                    default = f"Part {s['part']}" if s["part"] <= len(ss.parts) else "skip"
-                    s["part_choice"] = top[1].selectbox(
-                        "Part", part_opts, index=part_opts.index(default),
-                        key=f"part_{s['id']}")
-                    if s["compared_line"]:
-                        st.markdown(f"#### 🔎 {s['compared_line']}")
-                    st.markdown(
-                        f"- **Compared from (current basis):** {s['current_basis']}\n"
-                        f"- **Compared to (proposed basis):** {s['proposed_basis']}\n"
-                        f"- **Page title:** {' / '.join(s['title']) or '—'}\n"
-                        + (f"- **Comparisons on page:** {'; '.join(s['comparisons'])}\n"
-                           if s["comparisons"] else "")
-                        + (f"- **Footnotes:** {' '.join(s['footnotes'])}\n"
-                           if s["footnotes"] else ""))
-                    vt = pd.DataFrame([
-                        {"Field": FIELD_LABELS.get(k, k), "Value": v,
-                         "Source": s["sources"].get(k, "")}
-                        for k, v in s["values"].items()])
-                    st.dataframe(vt, hide_index=True, width="stretch")
-                    for n in s["notes"]:
-                        st.info(n)
+            res = lr.resolve_company(secs, metas)
+            resolved[comp] = res
+            with st.container(border=True):
+                st.markdown(f"#### {comp}")
+                lt, ch, lt2 = res["latest"], res["chart"], res["ldaf_tbl"]
+                summ = [
+                    ("Latest proposed GAF", ch.get("prop_gaf"), res["sources"].get("GAF")),
+                    ("Latest proposed LDAF", lt2.get("prop_ldaf"), res["sources"].get("LDAF")),
+                    ("Average prior peak GAF", ch.get("prior_gaf"),
+                     res["sources"].get("prior_gaf")),
+                    ("Current peak LDAF (11/1)", lt2.get("cur_ldaf"),
+                     res["sources"].get("cur_ldaf")),
+                    ("Off-peak LDAF", lt2.get("offpeak_ldaf"), res["sources"].get("offpeak_ldaf")),
+                    ("Monthly bill (prior → proposed)",
+                     (f"${ch['prior_bill']:,.2f} → ${ch['prop_bill']:,.2f}"
+                      if ch.get("prior_bill") is not None and ch.get("prop_bill") is not None
+                      else None), res["sources"].get("bills")),
+                ]
+                if res["alt"]:
+                    a = res["alt"]
+                    summ.append(("Alternative LDAF (peak / off-peak)",
+                                 f"{a.get('alt_peak_ldaf') or 0:.4f} / "
+                                 f"{a.get('alt_offpeak_ldaf') or 0:.4f}",
+                                 res["sources"].get("alt")))
+                st.dataframe(pd.DataFrame([{
+                    "Item": k, "Value": (f"{v:.4f}" if isinstance(v, float) else (v or "—")),
+                    "Taken from": src or "not found in the filings"} for k, v, src in summ]),
+                    hide_index=True, width="stretch")
+                for n in res["notes"]:
+                    st.warning(n)
+                st.markdown("**Every scenario the company filed**")
+                cmp_df = pd.DataFrame(res["compare"])
+                st.dataframe(cmp_df, hide_index=True, width="stretch",
+                             column_config={"Compared from": st.column_config.TextColumn(width="medium"),
+                                            "Compared to": st.column_config.TextColumn(width="medium")})
+        ss.resolved = resolved
 
-        if st.button("Fill Parts from sections", type="primary"):
-            for s in ss.sections:
-                ch = s.get("part_choice", "skip")
-                if ch == "skip":
-                    continue
-                if ch == "+ new Part":
-                    ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
-                    idx = len(ss.parts) - 1
+        if st.button("Build chart from latest rates", type="primary"):
+            part = next((p for p in ss.parts if p["name"].startswith("Latest")), None)
+            if part is None:
+                if len(ss.parts) == 1 and ss.parts[0]["peak"][PEAK_INPUTS].isna().all().all():
+                    part = ss.parts[0]
                 else:
-                    idx = int(ch.split()[1]) - 1
-                part = ss.parts[idx]
-                peak = part["peak"].set_index("Company")
-                ldaf = part["ldaf"].set_index("Company")
-                for k, v in s["values"].items():
-                    if v is None:
-                        continue
-                    (peak if k in PEAK_INPUTS else ldaf).at[s["company"], k] = v
-                part["peak"], part["ldaf"] = peak.reset_index(), ldaf.reset_index()
-                part["notes"][s["company"]] = {
-                    NOTE_COLS[0]: s["name"],
-                    NOTE_COLS[1]: s["current_basis"],
-                    NOTE_COLS[2]: (s["proposed_basis"]
-                                   + (f" — {s['compared_line']}" if s["compared_line"] else "")),
-                    NOTE_COLS[3]: f"{s['file']} {s['page']}",
+                    part = blank_part("")
+                    ss.parts.append(part)
+            part["name"] = f"Latest proposed rates — {proposed}"
+            part.setdefault("alt", blank_alt())
+            peak = part["peak"].set_index("Company")
+            ldaf = part["ldaf"].set_index("Company")
+            alt = part["alt"].set_index("Company")
+            for comp, res in resolved.items():
+                for k, v in res["chart"].items():
+                    peak.at[comp, k] = v
+                for k, v in res["ldaf_tbl"].items():
+                    ldaf.at[comp, k] = v
+                for k, v in res["alt"].items():
+                    if v is not None:
+                        alt.at[comp, k] = v
+                bs = res.get("bill_section")
+                part["notes"][comp] = {
+                    NOTE_COLS[0]: (f"Latest GAF: {res['sources'].get('GAF', '—')} | "
+                                   f"Latest LDAF: {res['sources'].get('LDAF', '—')}"),
+                    NOTE_COLS[1]: bs["current_basis"] if bs else "",
+                    NOTE_COLS[2]: ((bs.get("compared_line") or bs["proposed_basis"])
+                                   if bs else ""),
+                    NOTE_COLS[3]: res["sources"].get("bills", ""),
                 }
-                if part["name"] == f"Part {idx + 1}":
-                    part["name"] = f"Part {idx + 1} — {s['name']}"
-                part["ver"] += 1
+            part["peak"], part["ldaf"], part["alt"] = (peak.reset_index(), ldaf.reset_index(),
+                                                       alt.reset_index())
+            part["ver"] += 1
             st.rerun()
+
+    # ---- Sections found (manual) ------------------------------------------
+    if ss.sections:
+        with st.expander(f"All {len(ss.sections)} sections in detail — optional: put a "
+                         "specific scenario into its own Part", expanded=False):
+          st.markdown("**Sections identified — what each one compares**")
+          st.caption("Check the basis of each section, then choose which Part "
+                     "(chart) it goes into. Sections that compare different things "
+                     "should go into different Parts.")
+          part_opts = ["skip"] + [f"Part {i + 1}" for i in range(len(ss.parts))] \
+              + ["+ new Part"]
+          by_co = {}
+          for s in ss.sections:
+              by_co.setdefault(s["company"], []).append(s)
+          for comp, secs in by_co.items():
+              if len(secs) > 1:
+                  st.caption(f"{comp}: {len(secs)} sections — the latest rates above are "
+                             "already chosen; assign a section here only to chart that scenario separately.")
+              for s in secs:
+                  with st.container(border=True):
+                      top = st.columns([4, 1])
+                      top[0].markdown(f"**{comp}** · {s['name']}  \n"
+                                      f"`{s['file']}` {s['page']}")
+                      default = (f"Part {s['part']}" if 0 < s["part"] <= len(ss.parts)
+                           else "skip")
+                      s["part_choice"] = top[1].selectbox(
+                          "Part", part_opts, index=part_opts.index(default),
+                          key=f"part_{s['id']}")
+                      if s["compared_line"]:
+                          st.markdown(f"#### 🔎 {s['compared_line']}")
+                      st.markdown(
+                          f"- **Compared from (current basis):** {s['current_basis']}\n"
+                          f"- **Compared to (proposed basis):** {s['proposed_basis']}\n"
+                          f"- **Page title:** {' / '.join(s['title']) or '—'}\n"
+                          + (f"- **Comparisons on page:** {'; '.join(s['comparisons'])}\n"
+                             if s["comparisons"] else "")
+                          + (f"- **Footnotes:** {' '.join(s['footnotes'])}\n"
+                             if s["footnotes"] else ""))
+                      vt = pd.DataFrame([
+                          {"Field": FIELD_LABELS.get(k, k), "Value": v,
+                           "Source": s["sources"].get(k, "")}
+                          for k, v in s["values"].items()])
+                      st.dataframe(vt, hide_index=True, width="stretch")
+                      for n in s["notes"]:
+                          st.info(n)
+
+          if st.button("Fill Parts from sections", type="primary"):
+              for s in ss.sections:
+                  ch = s.get("part_choice", "skip")
+                  if ch == "skip":
+                      continue
+                  if ch == "+ new Part":
+                      ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
+                      idx = len(ss.parts) - 1
+                  else:
+                      idx = int(ch.split()[1]) - 1
+                  part = ss.parts[idx]
+                  peak = part["peak"].set_index("Company")
+                  ldaf = part["ldaf"].set_index("Company")
+                  for k, v in s["values"].items():
+                      if v is None:
+                          continue
+                      (peak if k in PEAK_INPUTS else ldaf).at[s["company"], k] = v
+                  part["peak"], part["ldaf"] = peak.reset_index(), ldaf.reset_index()
+                  part["notes"][s["company"]] = {
+                      NOTE_COLS[0]: s["name"],
+                      NOTE_COLS[1]: s["current_basis"],
+                      NOTE_COLS[2]: (s["proposed_basis"]
+                                     + (f" — {s['compared_line']}" if s["compared_line"] else "")),
+                      NOTE_COLS[3]: f"{s['file']} {s['page']}",
+                  }
+                  if part["name"] == f"Part {idx + 1}":
+                      part["name"] = f"Part {idx + 1} — {s['name']}"
+                  part["ver"] += 1
+              st.rerun()
 
     # ---- 3. Parts ----------------------------------------------------------
     st.subheader("3 · Parts (one chart each)")
@@ -664,10 +810,30 @@ def peak_chart_page():
             st.dataframe(ldaf_out.style.format(lfmt, na_rep=""), hide_index=True,
                          width="stretch")
 
+            st.markdown("**Alternative Residential LDAF to split costs with off-peak**")
+            part.setdefault("alt", blank_alt())
+            acfg = {"Company": st.column_config.TextColumn(disabled=True)}
+            for k in ALT_INPUTS:
+                acfg[k] = st.column_config.NumberColumn(
+                    ACOLS[k], format="%.2f" if k == "usage_offpeak" else "%.4f")
+            alt_in = st.data_editor(part["alt"], column_config=acfg, hide_index=True,
+                                    width="stretch", key=f"alt_{i}_{part['ver']}")
+            alt_out = build_export(compute_alt(alt_in, peak_calc["usage"]), ACOLS,
+                                   ALT_ORDER, avg_cols=[])
+            afmt = {ACOLS[k]: "{:.4f}" for k in ["cur_ldaf", "offpeak_ldaf",
+                                                 "alt_peak_ldaf", "alt_offpeak_ldaf"]}
+            afmt[ACOLS["pct_alt"]] = "{:.2%}"
+            afmt.update({ACOLS[k]: "${:,.2f}" for k in ["chg_alt_peak", "chg_alt_off"]})
+            afmt[ACOLS["usage_offpeak"]] = "{:.2f}"
+            st.dataframe(alt_out.style.format(afmt, na_rep=""), hide_index=True,
+                         width="stretch")
+
             stamp = proposed_short.replace("/", "-")
             safe = re.sub(r"[^A-Za-z0-9]+", "_", part["name"])[:40].strip("_")
             part_csv = (f"{part['name']}\n" + peak_out.to_csv(index=False)
-                        + "\n,Residential-Heating LDAF\n" + ldaf_out.to_csv(index=False))
+                        + "\n,Residential-Heating LDAF\n" + ldaf_out.to_csv(index=False)
+                        + "\n,Alternative Residential LDAF to split costs with off-peak\n"
+                        + alt_out.to_csv(index=False))
             st.download_button(f"Download {part['name'][:30]} CSV",
                                part_csv.encode("utf-8-sig"),
                                file_name=f"{stamp}_PEAK_{safe}.csv", mime="text/csv",
@@ -675,7 +841,7 @@ def peak_chart_page():
             exports.append(part_csv)
 
             # keep edits without resetting the editor on every rerun
-            part["peak_live"], part["ldaf_live"] = peak_in, ldaf_in
+            part["peak_live"], part["ldaf_live"], part["alt_live"] = peak_in, ldaf_in, alt_in
 
     # ---- 4. Export all -----------------------------------------------------
     st.subheader("4 · Export")
@@ -690,6 +856,8 @@ def peak_chart_page():
         if "peak_live" in part:
             part["peak"] = part.pop("peak_live")
             part["ldaf"] = part.pop("ldaf_live")
+            if "alt_live" in part:
+                part["alt"] = part.pop("alt_live")
 
     if st.button("Clear everything"):
         for k in [k for k in ss.keys() if not str(k).startswith("mg_")]:
