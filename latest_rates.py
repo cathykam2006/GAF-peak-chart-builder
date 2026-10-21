@@ -185,7 +185,8 @@ def resolve_company(secs, metas):
     nov.sort(key=lambda s: score(s, "LDAF"), reverse=True)
     if nov:
         out["ldaf_tbl"]["cur_ldaf"] = nov[0]["values"]["cur_ldaf"]
-        out["sources"]["cur_ldaf"] = f"{nov[0]['file']} · {section_label(nov[0])}"
+        out["sources"]["cur_ldaf"] = (f"{nov[0]['file']} · {section_label(nov[0])} "
+                                      f"({nov[0]['page']}): {nov[0]['current_basis']}")
     offp = [(s, s.get("extra", {}).get("cur_ldaf_offpeak")) for s in secs
             if basis_flags(s)["offpeak_listed"]]
     offp += [(s, s["values"].get("cur_ldaf")) for s in secs if basis_flags(s)["ldaf_may"]]
@@ -193,7 +194,9 @@ def resolve_company(secs, metas):
     offp.sort(key=lambda t: score(t[0], "LDAF"), reverse=True)
     if offp:
         out["ldaf_tbl"]["offpeak_ldaf"] = offp[0][1]
-        out["sources"]["offpeak_ldaf"] = f"{offp[0][0]['file']} · {section_label(offp[0][0])}"
+        o = offp[0][0]
+        out["sources"]["offpeak_ldaf"] = (f"{o['file']} · {section_label(o)} ({o['page']}): "
+                                          f"{o['current_basis']}")
 
     # bills: the scenario that matches the latest GAF and LDAF, against the
     # average prior GAF and the 11/1 LDAF (only GAF + LDAF change)

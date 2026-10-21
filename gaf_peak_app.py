@@ -478,6 +478,75 @@ def blank_alt():
                          for c in DATA_COMPANIES]).astype({k: "float64" for k in ALT_INPUTS})
 
 
+def build_chart(resolved, proposed):
+    """One chart from the latest rates, with the source of every value."""
+    chart = blank_part(f"Latest proposed rates — {proposed}")
+    chart["src"], chart["built"] = {}, {}
+    peak = chart["peak"].set_index("Company")
+    ldaf = chart["ldaf"].set_index("Company")
+    alt = chart["alt"].set_index("Company")
+    calc = "Calculated: "
+    for comp, res in resolved.items():
+        S = res["sources"]
+        bs = res.get("bill_section")
+        bill_src = S.get("bills", "")
+        built = {"peak": {}, "ldaf": {}, "alt": {}}
+        for k, v in res["chart"].items():
+            peak.at[comp, k] = v
+            built["peak"][k] = v
+        for k, v in res["ldaf_tbl"].items():
+            ldaf.at[comp, k] = v
+            built["ldaf"][k] = v
+        for k, v in res["alt"].items():
+            if v is not None:
+                alt.at[comp, k] = v
+                built["alt"][k] = v
+        usage_src = (f"{bill_src} — {bs['sources'].get('usage', '')}" if bs else "")
+        chart["src"][comp] = {
+            "peak": {
+                "prior_gaf": S.get("prior_gaf", ""),
+                "prop_gaf": S.get("GAF", ""),
+                "pct_gaf": calc + "(Proposed GAF − Average prior GAF) ÷ Average prior GAF",
+                "usage": usage_src,
+                "prior_bill": (f"{bill_src} — {bs['sources'].get('prior_bill', '')}"
+                               if bs else ""),
+                "prop_bill": (f"{bill_src} — {bs['sources'].get('prop_bill', '')}"
+                              if bs else ""),
+                "chg_bill": calc + "Proposed bill − Prior bill",
+                "pct_bill": calc + "Bill change ÷ Prior bill",
+                "chg_gaf_only": calc + "(Proposed GAF − Average prior GAF) × usage",
+                "chg_old_ldaf": "Not in the filings — type in by hand",
+            },
+            "ldaf": {
+                "cur_ldaf": S.get("cur_ldaf", ""),
+                "reduced_ldaf": "Not in the filings — type in by hand",
+                "offpeak_ldaf": S.get("offpeak_ldaf", ""),
+                "prop_ldaf": S.get("LDAF", ""),
+                "pct_ldaf": calc + "(Proposed LDAF − 11/1 LDAF) ÷ 11/1 LDAF",
+                "prior_winter_bill": (f"{bill_src} — current bill, peak-period total"
+                                      if bs else ""),
+                "prop_winter_bill": (f"{bill_src} — proposed bill, peak-period total"
+                                     if bs else ""),
+                "chg_total_bill": calc + "usage × (Proposed LDAF − 11/1 LDAF)",
+            },
+            "alt": ({
+                "cur_ldaf": S.get("cur_ldaf", ""),
+                "offpeak_ldaf": S.get("offpeak_ldaf", ""),
+                "alt_peak_ldaf": f"{S.get('alt', '')} — proposed LDAF, peak months",
+                "alt_offpeak_ldaf": f"{S.get('alt', '')} — proposed LDAF, off-peak months",
+                "pct_alt": calc + "(Alternative peak LDAF − 11/1 LDAF) ÷ 11/1 LDAF",
+                "chg_alt_peak": calc + "peak usage × (Alternative peak LDAF − 11/1 LDAF)",
+                "chg_alt_off": calc + "off-peak usage × (Alternative off-peak LDAF − "
+                                      "off-peak LDAF)",
+                "usage_offpeak": f"{S.get('alt', '')} — off-peak therms ÷ 6",
+            } if res["alt"] else {}),
+        }
+        chart["built"][comp] = built
+    chart["peak"], chart["ldaf"], chart["alt"] = (peak.reset_index(), ldaf.reset_index(),
+                                                  alt.reset_index())
+    return chart
+
+
 def blank_part(name):
     peak = pd.DataFrame([{"Company": c, **{k: None for k in PEAK_INPUTS}}
                          for c in DATA_COMPANIES]).astype(
@@ -524,7 +593,6 @@ def peak_chart_page():
     FIELD_LABELS = {**PCOLS, **LCOLS}
 
     ss = st.session_state
-    ss.setdefault("parts", [blank_part("Part 1")])
     ss.setdefault("sections", [])      # every scenario found, across files
 
     # ---- 1. Drag and drop -----------------------------------------------------
@@ -649,124 +717,46 @@ def peak_chart_page():
                                             "Compared to": st.column_config.TextColumn(width="medium")})
         ss.resolved = resolved
 
-        if st.button("Build chart from latest rates", type="primary"):
-            part = next((p for p in ss.parts if p["name"].startswith("Latest")), None)
-            if part is None:
-                if len(ss.parts) == 1 and ss.parts[0]["peak"][PEAK_INPUTS].isna().all().all():
-                    part = ss.parts[0]
-                else:
-                    part = blank_part("")
-                    ss.parts.append(part)
-            part["name"] = f"Latest proposed rates — {proposed}"
-            part.setdefault("alt", blank_alt())
-            peak = part["peak"].set_index("Company")
-            ldaf = part["ldaf"].set_index("Company")
-            alt = part["alt"].set_index("Company")
-            for comp, res in resolved.items():
-                for k, v in res["chart"].items():
-                    peak.at[comp, k] = v
-                for k, v in res["ldaf_tbl"].items():
-                    ldaf.at[comp, k] = v
-                for k, v in res["alt"].items():
-                    if v is not None:
-                        alt.at[comp, k] = v
-                bs = res.get("bill_section")
-                part["notes"][comp] = {
-                    NOTE_COLS[0]: (f"Latest GAF: {res['sources'].get('GAF', '—')} | "
-                                   f"Latest LDAF: {res['sources'].get('LDAF', '—')}"),
-                    NOTE_COLS[1]: bs["current_basis"] if bs else "",
-                    NOTE_COLS[2]: ((bs.get("compared_line") or bs["proposed_basis"])
-                                   if bs else ""),
-                    NOTE_COLS[3]: res["sources"].get("bills", ""),
-                }
-            part["peak"], part["ldaf"], part["alt"] = (peak.reset_index(), ldaf.reset_index(),
-                                                       alt.reset_index())
-            part["ver"] += 1
+    # ---- scenario details (reference only) ---------------------------------
+    if ss.sections:
+        with st.expander(f"Details of all {len(ss.sections)} scenario sections the "
+                         "company filed (reference)", expanded=False):
+            for s in ss.sections:
+                with st.container(border=True):
+                    st.markdown(f"**{s['company']}** · {s['name']}  \n"
+                                f"`{s['file']}` {s['page']}")
+                    st.markdown(
+                        f"- **Compared from (current basis):** {s['current_basis']}\n"
+                        f"- **Compared to:** {s.get('compared_line') or s['proposed_basis']}\n"
+                        + (f"- **Footnotes:** {' '.join(s['footnotes'])}\n"
+                           if s["footnotes"] else ""))
+                    st.dataframe(pd.DataFrame([
+                        {"Field": FIELD_LABELS.get(k, k), "Value": v,
+                         "Source on the page": s["sources"].get(k, "")}
+                        for k, v in s["values"].items()]), hide_index=True, width="stretch")
+                    for n in s["notes"]:
+                        st.info(n)
+
+    # ---- 3. The chart ------------------------------------------------------
+    resolved = ss.get("resolved", {})
+    sig = tuple(s["id"] for s in ss.sections)
+    if "chart" not in ss or ss.get("chart_sig") != sig:
+        ss.chart = build_chart(resolved, proposed)
+        ss.chart_sig = sig
+    chart = ss.chart
+
+    st.subheader(f"3 · Peak chart — latest proposed rates ({proposed}, R-3)")
+    if not resolved:
+        st.caption("Drop filings and click **Identify sections** — the chart fills "
+                   "itself from the latest rates. You can also type values directly.")
+    else:
+        st.caption("Filled from the latest rates in step 2. Edit any white cell; "
+                   "under each table, *Where each number comes from* names the file, "
+                   "section, page and basis behind every value.")
+        if st.button("Reset chart to the latest rates"):
+            ss.chart = build_chart(resolved, proposed)
             st.rerun()
 
-    # ---- Sections found (manual) ------------------------------------------
-    if ss.sections:
-        with st.expander(f"All {len(ss.sections)} sections in detail — optional: put a "
-                         "specific scenario into its own Part", expanded=False):
-          st.markdown("**Sections identified — what each one compares**")
-          st.caption("Check the basis of each section, then choose which Part "
-                     "(chart) it goes into. Sections that compare different things "
-                     "should go into different Parts.")
-          part_opts = ["skip"] + [f"Part {i + 1}" for i in range(len(ss.parts))] \
-              + ["+ new Part"]
-          by_co = {}
-          for s in ss.sections:
-              by_co.setdefault(s["company"], []).append(s)
-          for comp, secs in by_co.items():
-              if len(secs) > 1:
-                  st.caption(f"{comp}: {len(secs)} sections — the latest rates above are "
-                             "already chosen; assign a section here only to chart that scenario separately.")
-              for s in secs:
-                  with st.container(border=True):
-                      top = st.columns([4, 1])
-                      top[0].markdown(f"**{comp}** · {s['name']}  \n"
-                                      f"`{s['file']}` {s['page']}")
-                      default = (f"Part {s['part']}" if 0 < s["part"] <= len(ss.parts)
-                           else "skip")
-                      s["part_choice"] = top[1].selectbox(
-                          "Part", part_opts, index=part_opts.index(default),
-                          key=f"part_{s['id']}")
-                      if s["compared_line"]:
-                          st.markdown(f"#### 🔎 {s['compared_line']}")
-                      st.markdown(
-                          f"- **Compared from (current basis):** {s['current_basis']}\n"
-                          f"- **Compared to (proposed basis):** {s['proposed_basis']}\n"
-                          f"- **Page title:** {' / '.join(s['title']) or '—'}\n"
-                          + (f"- **Comparisons on page:** {'; '.join(s['comparisons'])}\n"
-                             if s["comparisons"] else "")
-                          + (f"- **Footnotes:** {' '.join(s['footnotes'])}\n"
-                             if s["footnotes"] else ""))
-                      vt = pd.DataFrame([
-                          {"Field": FIELD_LABELS.get(k, k), "Value": v,
-                           "Source": s["sources"].get(k, "")}
-                          for k, v in s["values"].items()])
-                      st.dataframe(vt, hide_index=True, width="stretch")
-                      for n in s["notes"]:
-                          st.info(n)
-
-          if st.button("Fill Parts from sections", type="primary"):
-              for s in ss.sections:
-                  ch = s.get("part_choice", "skip")
-                  if ch == "skip":
-                      continue
-                  if ch == "+ new Part":
-                      ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
-                      idx = len(ss.parts) - 1
-                  else:
-                      idx = int(ch.split()[1]) - 1
-                  part = ss.parts[idx]
-                  peak = part["peak"].set_index("Company")
-                  ldaf = part["ldaf"].set_index("Company")
-                  for k, v in s["values"].items():
-                      if v is None:
-                          continue
-                      (peak if k in PEAK_INPUTS else ldaf).at[s["company"], k] = v
-                  part["peak"], part["ldaf"] = peak.reset_index(), ldaf.reset_index()
-                  part["notes"][s["company"]] = {
-                      NOTE_COLS[0]: s["name"],
-                      NOTE_COLS[1]: s["current_basis"],
-                      NOTE_COLS[2]: (s["proposed_basis"]
-                                     + (f" — {s['compared_line']}" if s["compared_line"] else "")),
-                      NOTE_COLS[3]: f"{s['file']} {s['page']}",
-                  }
-                  if part["name"] == f"Part {idx + 1}":
-                      part["name"] = f"Part {idx + 1} — {s['name']}"
-                  part["ver"] += 1
-              st.rerun()
-
-    # ---- 3. Parts ----------------------------------------------------------
-    st.subheader("3 · Parts (one chart each)")
-    if st.button("+ Add empty Part"):
-        ss.parts.append(blank_part(f"Part {len(ss.parts) + 1}"))
-        st.rerun()
-
-    exports = []
-    tabs = st.tabs([p["name"][:40] for p in ss.parts])
     pfmt = {PCOLS[k]: "{:.4f}" for k in ["prior_gaf", "prop_gaf"]}
     pfmt.update({PCOLS[k]: "{:.2%}" for k in ["pct_gaf", "pct_bill"]})
     pfmt.update({PCOLS[k]: "${:,.2f}" for k in ["prior_bill", "prop_bill", "chg_bill",
@@ -777,87 +767,105 @@ def peak_chart_page():
     lfmt[LCOLS["pct_ldaf"]] = "{:.2%}"
     lfmt.update({LCOLS[k]: "${:,.2f}" for k in ["prior_winter_bill",
                                                  "prop_winter_bill", "chg_total_bill"]})
+    afmt = {ACOLS[k]: "{:.4f}" for k in ["cur_ldaf", "offpeak_ldaf",
+                                         "alt_peak_ldaf", "alt_offpeak_ldaf"]}
+    afmt[ACOLS["pct_alt"]] = "{:.2%}"
+    afmt.update({ACOLS[k]: "${:,.2f}" for k in ["chg_alt_peak", "chg_alt_off"]})
+    afmt[ACOLS["usage_offpeak"]] = "{:.2f}"
 
-    for i, (tab, part) in enumerate(zip(tabs, ss.parts)):
-        with tab:
-            part["name"] = st.text_input("Part name (goes in the CSV)", part["name"],
-                                         key=f"pname_{i}")
-            st.markdown("**Peak chart** — edit inputs here")
-            cfg = {"Company": st.column_config.TextColumn(disabled=True)}
-            for k in PEAK_INPUTS:
-                f = "%.4f" if "gaf" in k else ("%.2f" if k == "usage" else "$%.2f")
-                cfg[k] = st.column_config.NumberColumn(PCOLS[k], format=f)
-            peak_in = st.data_editor(part["peak"], column_config=cfg, hide_index=True,
-                                     width="stretch",
-                                     key=f"peak_{i}_{part['ver']}")
-            peak_calc = compute_peak(peak_in)
-            peak_out = build_export(peak_calc, PCOLS, PEAK_ORDER,
-                                    avg_cols=[k for k in PEAK_ORDER if k != "usage"],
-                                    notes=part["notes"])
-            st.dataframe(peak_out.style.format(pfmt, na_rep=""), hide_index=True,
-                         width="stretch")
+    def source_table(table_key, colmap, order, current, inputs):
+        rows = []
+        cur = current.set_index("Company")
+        for comp in DATA_COMPANIES:
+            src = chart["src"].get(comp, {}).get(table_key, {})
+            if not src and cur.loc[comp].isna().all():
+                continue
+            for k in order:
+                v = cur.at[comp, k] if k in cur.columns else None
+                built = chart["built"].get(comp, {}).get(table_key, {}).get(k)
+                origin = src.get(k, "")
+                if k in inputs and pd.notna(v) and (built is None or abs(v - built) > 1e-9):
+                    origin = "Typed in by hand"
+                if not origin and (k not in cur.columns or pd.isna(v)):
+                    continue
+                rows.append({"Company": comp, "Column": colmap[k].strip(),
+                             "Value": ("" if v is None or pd.isna(v) else
+                                       f"{v:.2%}" if k.startswith("pct") else
+                                       f"{v:.4f}" if ("gaf" in k or "ldaf" in k) and not k.startswith("chg")
+                                       else f"{v:,.2f}"),
+                             "Where it comes from": origin or "Calculated"})
+        return pd.DataFrame(rows)
 
-            st.markdown("**Residential-Heating LDAF**")
-            lcfg = {"Company": st.column_config.TextColumn(disabled=True)}
-            for k in LDAF_INPUTS:
-                lcfg[k] = st.column_config.NumberColumn(
-                    LCOLS[k], format="$%.2f" if "bill" in k else "%.4f")
-            ldaf_in = st.data_editor(part["ldaf"], column_config=lcfg, hide_index=True,
-                                     width="stretch",
-                                     key=f"ldaf_{i}_{part['ver']}")
-            ldaf_out = build_export(compute_ldaf(ldaf_in, peak_calc["usage"]),
-                                    LCOLS, LDAF_ORDER, avg_cols=[])
-            st.dataframe(ldaf_out.style.format(lfmt, na_rep=""), hide_index=True,
-                         width="stretch")
+    sources_out = []
 
-            st.markdown("**Alternative Residential LDAF to split costs with off-peak**")
-            part.setdefault("alt", blank_alt())
-            acfg = {"Company": st.column_config.TextColumn(disabled=True)}
-            for k in ALT_INPUTS:
-                acfg[k] = st.column_config.NumberColumn(
-                    ACOLS[k], format="%.2f" if k == "usage_offpeak" else "%.4f")
-            alt_in = st.data_editor(part["alt"], column_config=acfg, hide_index=True,
-                                    width="stretch", key=f"alt_{i}_{part['ver']}")
-            alt_out = build_export(compute_alt(alt_in, peak_calc["usage"]), ACOLS,
-                                   ALT_ORDER, avg_cols=[])
-            afmt = {ACOLS[k]: "{:.4f}" for k in ["cur_ldaf", "offpeak_ldaf",
-                                                 "alt_peak_ldaf", "alt_offpeak_ldaf"]}
-            afmt[ACOLS["pct_alt"]] = "{:.2%}"
-            afmt.update({ACOLS[k]: "${:,.2f}" for k in ["chg_alt_peak", "chg_alt_off"]})
-            afmt[ACOLS["usage_offpeak"]] = "{:.2f}"
-            st.dataframe(alt_out.style.format(afmt, na_rep=""), hide_index=True,
-                         width="stretch")
+    # peak chart
+    st.markdown("**Peak chart**")
+    cfg = {"Company": st.column_config.TextColumn(disabled=True)}
+    for k in PEAK_INPUTS:
+        f = "%.4f" if "gaf" in k else ("%.2f" if k == "usage" else "$%.2f")
+        cfg[k] = st.column_config.NumberColumn(PCOLS[k], format=f)
+    peak_in = st.data_editor(chart["peak"], column_config=cfg, hide_index=True,
+                             width="stretch", key=f"peak_ed_{chart['ver']}")
+    peak_calc = compute_peak(peak_in)
+    peak_out = build_export(peak_calc, PCOLS, PEAK_ORDER,
+                            avg_cols=[k for k in PEAK_ORDER if k != "usage"])
+    st.dataframe(peak_out.style.format(pfmt, na_rep=""), hide_index=True, width="stretch")
+    src_peak = source_table("peak", PCOLS, PEAK_ORDER, peak_calc, PEAK_INPUTS)
+    if not src_peak.empty:
+        with st.expander("Where each number in the peak chart comes from"):
+            st.dataframe(src_peak, hide_index=True, width="stretch")
+        sources_out.append(("Peak chart", src_peak))
 
-            stamp = proposed_short.replace("/", "-")
-            safe = re.sub(r"[^A-Za-z0-9]+", "_", part["name"])[:40].strip("_")
-            part_csv = (f"{part['name']}\n" + peak_out.to_csv(index=False)
-                        + "\n,Residential-Heating LDAF\n" + ldaf_out.to_csv(index=False)
-                        + "\n,Alternative Residential LDAF to split costs with off-peak\n"
-                        + alt_out.to_csv(index=False))
-            st.download_button(f"Download {part['name'][:30]} CSV",
-                               part_csv.encode("utf-8-sig"),
-                               file_name=f"{stamp}_PEAK_{safe}.csv", mime="text/csv",
-                               key=f"dl_{i}")
-            exports.append(part_csv)
+    # LDAF table
+    st.markdown("**Residential-Heating LDAF**")
+    lcfg = {"Company": st.column_config.TextColumn(disabled=True)}
+    for k in LDAF_INPUTS:
+        lcfg[k] = st.column_config.NumberColumn(
+            LCOLS[k], format="$%.2f" if "bill" in k else "%.4f")
+    ldaf_in = st.data_editor(chart["ldaf"], column_config=lcfg, hide_index=True,
+                             width="stretch", key=f"ldaf_ed_{chart['ver']}")
+    ldaf_calc = compute_ldaf(ldaf_in, peak_calc["usage"])
+    ldaf_out = build_export(ldaf_calc, LCOLS, LDAF_ORDER, avg_cols=[])
+    st.dataframe(ldaf_out.style.format(lfmt, na_rep=""), hide_index=True, width="stretch")
+    src_ldaf = source_table("ldaf", LCOLS, LDAF_ORDER, ldaf_calc, LDAF_INPUTS)
+    if not src_ldaf.empty:
+        with st.expander("Where each number in the LDAF table comes from"):
+            st.dataframe(src_ldaf, hide_index=True, width="stretch")
+        sources_out.append(("Residential-Heating LDAF", src_ldaf))
 
-            # keep edits without resetting the editor on every rerun
-            part["peak_live"], part["ldaf_live"], part["alt_live"] = peak_in, ldaf_in, alt_in
+    # alternative LDAF table
+    st.markdown("**Alternative Residential LDAF to split costs with off-peak**")
+    acfg = {"Company": st.column_config.TextColumn(disabled=True)}
+    for k in ALT_INPUTS:
+        acfg[k] = st.column_config.NumberColumn(
+            ACOLS[k], format="%.2f" if k == "usage_offpeak" else "%.4f")
+    alt_in = st.data_editor(chart["alt"], column_config=acfg, hide_index=True,
+                            width="stretch", key=f"alt_ed_{chart['ver']}")
+    alt_calc = compute_alt(alt_in, peak_calc["usage"])
+    alt_out = build_export(alt_calc, ACOLS, ALT_ORDER, avg_cols=[])
+    st.dataframe(alt_out.style.format(afmt, na_rep=""), hide_index=True, width="stretch")
+    src_alt = source_table("alt", ACOLS, ALT_ORDER, alt_calc, ALT_INPUTS)
+    if not src_alt.empty:
+        with st.expander("Where each number in the alternative LDAF table comes from"):
+            st.dataframe(src_alt, hide_index=True, width="stretch")
+        sources_out.append(("Alternative Residential LDAF", src_alt))
 
-    # ---- 4. Export all -----------------------------------------------------
+    # ---- 4. Export ---------------------------------------------------------
     st.subheader("4 · Export")
-    st.download_button("Download all Parts in one CSV",
-                       "\n\n".join(exports).encode("utf-8-sig"),
-                       file_name=f"{proposed_short.replace('/', '-')}_PEAK_all_parts.csv",
-                       mime="text/csv", type="primary")
+    stamp = proposed_short.replace("/", "-")
+    out_csv = (f"{proposed_short} PEAK chart (R-3) — latest proposed rates\n"
+               + peak_out.to_csv(index=False)
+               + "\n,Residential-Heating LDAF\n" + ldaf_out.to_csv(index=False)
+               + "\n,Alternative Residential LDAF to split costs with off-peak\n"
+               + alt_out.to_csv(index=False))
+    for title_, df_ in sources_out:
+        out_csv += f"\n,Where each number comes from — {title_}\n" + df_.to_csv(index=False)
+    st.download_button("Download CSV", out_csv.encode("utf-8-sig"),
+                       file_name=f"{stamp}_PEAK_chart.csv", mime="text/csv", type="primary")
+    st.caption("One file: the three tables, then the source of every value.")
 
-    # Commit live edits into the base tables before the next fill so manual edits
-    # survive "Fill Parts from sections".
-    for part in ss.parts:
-        if "peak_live" in part:
-            part["peak"] = part.pop("peak_live")
-            part["ldaf"] = part.pop("ldaf_live")
-            if "alt_live" in part:
-                part["alt"] = part.pop("alt_live")
+    # keep edits across reruns
+    chart["peak"], chart["ldaf"], chart["alt"] = peak_in, ldaf_in, alt_in
 
     if st.button("Clear everything"):
         for k in [k for k in ss.keys() if not str(k).startswith("mg_")]:

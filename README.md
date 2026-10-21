@@ -13,34 +13,20 @@ pip install -r requirements.txt
 streamlit run gaf_peak_app.py
 ```
 
-## How it works
+## How it works (Peak chart page)
 
-1. **Drop filings**: drag and drop PDF or Excel schedules. The company is
-   detected from the file name (editable). Only the R-3 page/sheet is used,
-   based on the line that names the customer class.
-2. **Sections identified**: every R-3 scenario becomes a separate section that
-   shows what it compares:
-   - the page's "compared to" line
-   - *Compared from*: the current-rates header (e.g. LDAF / CGA effective dates)
-   - *Compared to*: the proposed-rates header
-   - variant subtitles, change lines, footnotes, and the source row of every value
-3. **Parts**: each scenario goes into its own Part (chart). Each Part has an
-   editable peak grid, the LDAF table, an Average row, comparison-basis columns,
-   and its own CSV download. All Parts can also be exported in one CSV.
-
-## What is pulled
-
-| Field | Source on the R-3 schedule |
-|---|---|
-| Peak average monthly usage | Peak-period therms ÷ 6 |
-| Prior / proposed peak GAF | Cost of Gas Adjustment (CGA) row, current vs proposed block (usage-weighted if it varies Nov–Apr) |
-| Prior / proposed monthly bill | Peak-period bill total ÷ 6 (plain / without-discount rows) |
-| Current / proposed LDAF | Total LDAC row |
-
-Calculated: % change in GAF, bill change, % bill change, change due to GAF only
-(ΔGAF × usage), LDAF total-bill change (usage × ΔLDAF).
-
-Entered by hand: bill change using prior LDAFs, reduced and off-peak LDAFs.
+1. **Drop filings**: drag and drop the companies' CGAC / LDAC filings or
+   typical-bill schedules (PDF or Excel). The company is detected (editable)
+   and every R-3 typical-bill page is found.
+2. **Identify sections** — **Latest GAF / LDAF and scenario comparison**: an
+   overview per company of the latest proposed rates and where they come from,
+   plus every scenario the company filed side by side (see below).
+3. **Peak chart — latest proposed rates**: one chart, filled automatically:
+   the peak chart, the Residential-Heating LDAF table and the Alternative
+   Residential LDAF table. Every cell can be edited. Under each table,
+   *Where each number comes from* names the file, section, page and basis of
+   each value (or the formula, or "typed in by hand").
+4. **Export**: one CSV with the three tables followed by the source of every value.
 
 ## Mass.gov rate page (second page in the sidebar)
 
@@ -98,7 +84,6 @@ After **Identify sections**, step 2 shows, for each company:
 - **every scenario the company filed** side by side (basis, filing date, GAF, peak
   and off-peak LDAF, bill), flagged where it differs from the latest rate.
 
-**Build chart from latest rates** fills one Part with the peak chart, the
-Residential-Heating LDAF table and the **Alternative Residential LDAF** table
-(filled from illustrative / re-allocation scenarios). Individual sections can
-still be charted as separate Parts from the expander below.
+The chart in step 3 is filled from these values automatically, including the
+**Alternative Residential LDAF** table (from illustrative / re-allocation
+scenarios). Details of every scenario section are available for reference.
