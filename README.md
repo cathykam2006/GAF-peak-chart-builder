@@ -44,24 +44,23 @@ Entered by hand: bill change using prior LDAFs, reduced and off-peak LDAFs.
 
 ## Mass.gov rate page (second page in the sidebar)
 
-Builds the next section of
-[Information on Gas Supply and Delivery Charges](https://www.mass.gov/info-details/information-on-gas-supply-and-delivery-charges).
+Pulls GAF/LDAF rates from PDFs and exports them as an Excel table laid out
+like [Information on Gas Supply and Delivery Charges](https://www.mass.gov/info-details/information-on-gas-supply-and-delivery-charges),
+ready to be transferred to the webpage.
 
-1. **Pull the posted rates**: read live from mass.gov. If the site blocks the
-   request, drop a saved copy of the page (.html) or paste text copied from it.
-   Any posted section can be viewed or exported as CSV, including the full history.
-   All posted revisions are listed newest first, grouped by season, with
-   links to their sections on the page. Any two revisions can be compared
-   (every GAF/LDAF change, and whether the page flagged it REVISED).
-2. **Start the next revision**: pick a base section. The next title and
-   effective dates are suggested, e.g. after *Off-Peak/Summer 2026 Rates
-   Revision 3 (Effective 10/1/26 through 10/31/26)* it suggests *Peak/Winter
-   2026-2027 Rates (Effective 11/1/26 through 11/30/26)*. All of these can be edited.
-3. **Fill in new values**:
-   - from a Peak chart Part: the proposed R-3 GAF and LDAF go into each
-     company's residential heating (or All Residential) row. The new GAF can also
-     be applied to other classes that shared the old residential heating GAF.
-   - or by editing each company's table and notes directly.
-   Companies whose values changed are marked **REVISED** automatically (can be overridden).
-4. **Export** in the page's format: plain text, HTML for the web editor, or CSV,
-   plus the updated revision list with the new section on top (text or HTML links).
+1. **Drop PDFs**: company rate filings. The app reads:
+   - typical-bill schedules (e.g. Attachment DPU-LDC-2-3(d)(3)): proposed CGA
+     (GAF) and Total LDAC (LDAF) for each rate class, for the effective month
+   - rate tables listing GAF and/or LDAF by rate class (R-1, G-41, T-54, ...)
+   - optionally a PDF of the mass.gov page itself (Print → Save as PDF), which
+     updates the starting layout (companies, notes, rate classes, posted values)
+2. **New section**: title and effective dates are suggested from the last posted
+   section (e.g. *Peak/Winter 2026-2027 Rates (Effective 11/1/26 through 11/30/26)*).
+3. **Review**: pulled rates are shown per file (editable, can be left out);
+   each is matched to the page's rate-class rows. A changed GAF can also be
+   applied to classes that shared the same posted GAF (e.g. EGMA G-40 to G-43
+   follow R-3). Values not in any filing are carried forward. Companies that
+   changed are marked REVISED automatically.
+4. **Export Excel**: sheet *Webpage layout* (section title, company headings with
+   REVISED, notes, Rate Class / Billing Unit / GAF / LDAF tables) and sheet
+   *Table* (same data as one flat table).

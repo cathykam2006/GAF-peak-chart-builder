@@ -3,21 +3,24 @@ Mass.gov rate page builder
 --------------------------
 Second page of the GAF Peak Chart Builder.  Created by Cathy Kam.
 
-* Pulls the posted GAF/LDAF tables from
-  https://www.mass.gov/info-details/information-on-gas-supply-and-delivery-charges
-  (live, from a saved copy of the page, or from pasted page text).
-* Starts the next revision from any posted section, with the next title and
-  effective dates suggested.
-* Fills new values from the Peak chart Parts (R-3 proposed GAF / LDAF) or by
-  hand, flags changed companies as REVISED automatically.
-* Exports in the page's format: plain text, HTML for the web editor, CSV.
+Drag and drop PDFs, pull the GAF / LDAF rates out of them, and export the
+result in the format of "Information on Gas Supply and Delivery Charges"
+(https://www.mass.gov/info-details/information-on-gas-supply-and-delivery-charges).
+
+PDFs that are recognised:
+  * company filings with typical-bill schedules (e.g. Attachment
+    DPU-LDC-2-3(d)(3)): proposed CGA (GAF) and Total LDAC (LDAF) by rate class
+  * rate tables listing GAF and/or LDAF by rate class (R-1, G-41, T-54, ...)
+  * a PDF of the mass.gov page itself (File > Print > Save as PDF): read as the
+    posted section that the new one is built from
 """
 
-import calendar
 import copy
 import html as htmlmod
+import io
 import re
 from datetime import date, datetime, timedelta
+import calendar
 
 import pandas as pd
 import streamlit as st
@@ -25,6 +28,8 @@ import streamlit as st
 PAGE_URL = ("https://www.mass.gov/info-details/"
             "information-on-gas-supply-and-delivery-charges")
 HEADER = ["Rate Class", "Billing Unit", "GAF", "LDAF"]
+MONTHS = ["jan", "feb", "mar", "apr", "may", "jun",
+          "jul", "aug", "sep", "oct", "nov", "dec"]
 
 SECTION_RE = re.compile(
     r"(?P<season>Peak/Winter|Off-Peak/Summer)\s+(?P<yr>\d{4}(?:\s*-\s*\d{4})?)\s+"
@@ -34,27 +39,72 @@ HEADER_RE = re.compile(r"^\s*Rate Class\s+Billing Unit\s+GAF\s+LDAF\s*$", re.I)
 ROW_RE = re.compile(r"^(?P<cls>.+?)\s+(?P<unit>\$/\s?[A-Za-z]+(?:\s+Therms)?)"
                     r"(?:\s+(?P<gaf>-?\d*\.\d+|-?\d+))?(?:\s+(?P<ldaf>-?\d*\.\d+|-?\d+))?\s*$")
 REVISED_RE = re.compile(r"\s*REVISED\s*$")
-
-# keyword -> how the company appears on the mass.gov page
 COMPANY_KEYS = ["berkshire", "eversource gas company", "bay state", "fitchburg",
                 "unitil", "blackstone", "north attleboro", "fall river",
                 "boston gas", "colonial", "nstar"]
 
-# Peak chart row -> keyword of the matching mass.gov company heading
-PEAK_TO_SITE = {
-    "Berkshire Gas": "berkshire",
-    "EGMA": "eversource gas company",
-    "Unitil (Fitchburg)": "fitchburg",
-    "Blackstone": "blackstone",
-    "Fall River/North Attleboro": "north attleboro",
-    "Boston Gas": "boston gas",
-    "former Colonial Gas": "colonial",
-    "NSTAR Gas": "nstar",
-}
+# Last posted section, used as the starting layout until a PDF of the page is
+# dropped (companies, notes, rate classes and current values).
+DEFAULT_PAGE_TEXT = """Off-Peak/Summer 2026 Rates Revision 3 (Effective 10/1/26 through 10/31/26)
+Berkshire Gas Company
+On July 31, 2026, the Department approved a settlement agreement between the company and the Attorney General in Berkshire Gas Company, D.P.U. 25-170. As a result, the GAF for all rate classes were revised on April 1, 2026.
+All Residential\t$/Therm\t0.3194\t0.9631
+G-41/G-51\t$/Therm\t0.3194\t0.2702
+G-42/G-52\t$/Therm\t0.3194\t0.2238
+G-43/G-53\t$/Therm\t0.3194\t0.1689
+T-54\t$/Therm\t0.3194\t0.0126
+Eversource Gas Company of Massachusetts (formerly Bay State Gas d/b/a Columbia Gas of Massachusetts)REVISED
+Beginning with the 2025–2026 heating season, Eversource has introduced a redesigned gas bill for its customers. You can view the company’s sample bill for details.
+Residential Non-Heating R-1, R-2\t$/Therm\t0.2540\t0.6564
+Residential Heating R-3, R-4\t$/Therm\t0.3145\t0.6564
+G-40\t$/Therm\t0.3145\t0.4124
+G-41\t$/Therm\t0.3145\t0.3052
+G-42\t$/Therm\t0.3145\t0.3425
+G-43\t$/Therm\t0.3145\t0.2957
+G-50\t$/Therm\t0.2540\t0.4124
+G-51\t$/Therm\t0.2540\t0.3052
+G-52\t$/Therm\t0.2540\t0.3425
+G-53\t$/Therm\t0.2540\t0.2957
+Fitchburg Gas d/b/a Unitil
+Residential Non-Heating R-1, R-2\t$/Therm\t0.3014\t1.3370
+Residential Heating R-3, R-4\t$/Therm\t0.3468\t1.7437
+G-41\t$/Therm\t0.3468\t0.6269
+G-42\t$/Therm\t0.3468\t0.4667
+G-43\t$/Therm\t0.3468\t0.4309
+G-51\t$/Therm\t0.3014\t0.6269
+G-52\t$/Therm\t0.3014\t0.4667
+G-53\t$/Therm\t0.3014\t0.4309
+Liberty Utilities - Blackstone (formerly Blackstone Gas Company)
+All Residential\t$/Therm\t0.1697\t0.3617
+G-41, G-42, G-43\t$/Therm\t0.1697\t0.3402
+G-51, G-52, G-53\t$/Therm\t0.1697\t0.3417
+Liberty Utilities - North Attleboro/Fall River
+All Residential\t$/Therm\t0.4047\t0.5114
+G-41, G-42, G-43\t$/Therm\t0.4047\t0.4626
+G-51, G-52, G-53\t$/Therm\t0.4047\t0.3913
+National Grid - Boston GasREVISED
+All Residential\t$/Therm\t0.3084\t1.0016
+G-41B/E, G-51B/E\t$/Therm\t0.3084\t0.4637
+G-42B/E, G-52B/E\t$/Therm\t0.3084\t0.4170
+G-43B/E, G-53B/E\t$/Therm\t0.3084\t0.4046
+G-44B, G-54B\t$/Therm\t0.2180\t0.3496
+G-44B, G-54B\t$/MDCQ Therms\t0.6907\t
+National Grid - former Colonial GasREVISED
+All Residential\t$/Therm\t0.3084\t0.8279
+G-41, G-51\t$/Therm\t0.3084\t0.2867
+G-42, G-52\t$/Therm\t0.3084\t0.2814
+G-43, G-53\t$/Therm\t0.3084\t0.2357
+NSTAR Gas Company d/b/a Eversource Energy
+Beginning with the 2025–2026 heating season, Eversource has introduced a redesigned gas bill for its customers. You can view the company’s sample bill for details.
+All Residential\t$/Therm\t0.3842\t0.7200
+G-41, G-51\t$/Therm\t0.3842\t0.3871
+G-42, G-52\t$/Therm\t0.3842\t0.3312
+Large C&I G-43, G-53\t$/Therm\t0.3842\t0.2579
+"""
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Small helpers
 # ---------------------------------------------------------------------------
 
 def to_num(s):
@@ -62,13 +112,16 @@ def to_num(s):
         return None
     if isinstance(s, (int, float)):
         return None if pd.isna(s) else float(s)
-    t = str(s).strip().replace("$", "").replace(",", "")
+    t = str(s).strip()
+    neg = t.startswith("(") and t.endswith(")")
+    t = re.sub(r"[()\$,\s]", "", t)
     if not t:
         return None
     try:
-        return float(t)
+        v = float(t)
     except ValueError:
         return None
+    return -v if neg else v
 
 
 def fmt_rate(v):
@@ -91,9 +144,14 @@ def mdy(d):
     return f"{d.month}/{d.day}/{d.strftime('%y')}"
 
 
-def is_company_line(text):
+def company_key(text):
     low = text.lower()
-    return len(text) < 170 and any(k in low for k in COMPANY_KEYS)
+    # NSTAR filings also say "Eversource", so test it first
+    for k in ["nstar"] + [k for k in COMPANY_KEYS if k != "nstar"]:
+        if k in low:
+            return {"bay state": "eversource gas company", "unitil": "fitchburg",
+                    "fall river": "north attleboro"}.get(k, k)
+    return None
 
 
 def new_section(title):
@@ -108,9 +166,8 @@ def new_section(title):
 
 
 def new_company(heading):
-    return {"name": REVISED_RE.sub(" ", heading).strip(),
-            "revised": bool(re.search(r"REVISED", heading)),
-            "notes": [], "notes_html": [], "rows": []}
+    return {"name": REVISED_RE.sub("", heading).strip(),
+            "revised": bool(REVISED_RE.search(heading)), "notes": [], "rows": []}
 
 
 def make_row(cells):
@@ -120,63 +177,22 @@ def make_row(cells):
 
 
 # ---------------------------------------------------------------------------
-# Parsers
+# Mass.gov page text (from a PDF of the page, or the built-in default)
 # ---------------------------------------------------------------------------
 
-def parse_html(page_html):
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(page_html, "html.parser")
-    sections, sec, comp = [], None, None
-    for el in soup.find_all(["h2", "h3", "h4", "h5", "p", "table"]):
-        if el.name != "table" and el.find_parent("table"):
-            continue
-        text = el.get_text(" ", strip=True)
-        if el.name == "h2":
-            if SECTION_RE.search(text):
-                sec, comp = new_section(text), None
-                sections.append(sec)
-            else:
-                sec, comp = None, None
-            continue
-        if sec is None:
-            continue
-        if el.name in ("h3", "h4", "h5") or (el.name == "p" and is_company_line(text)
-                                               and (comp is None or comp["rows"])):
-            if text:
-                comp = new_company(text)
-                sec["companies"].append(comp)
-            continue
-        if el.name == "p":
-            if text and comp is not None:
-                comp["notes"].append(text)
-                comp["notes_html"].append(el.decode_contents().strip())
-            continue
-        if el.name == "table":
-            if comp is None:
-                comp = new_company("(company not named)")
-                sec["companies"].append(comp)
-            for tr in el.find_all("tr"):
-                cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
-                if len(cells) < 2 or cells[0].lower() == "rate class":
-                    continue
-                comp["rows"].append(make_row(cells))
-    return [s for s in sections if s["companies"]]
-
-
-def parse_text(text):
-    """Parse text copied from the page (the format in the user's example)."""
+def parse_page_text(text):
     sections, sec, comp = [], None, None
     for raw in text.splitlines():
         line = raw.strip()
         if not line or HEADER_RE.match(line.replace("\t", " ")):
             continue
         if SECTION_RE.search(line):
-            sec, comp = new_section(line), None
+            sec, comp = new_section(SECTION_RE.search(line).group(0)), None
             sections.append(sec)
             continue
         if sec is None:
             continue
-        cells = [c for c in raw.split("\t")]
+        cells = raw.split("\t")
         row = None
         if len(cells) >= 3 and cells[1].strip().startswith("$"):
             row = make_row(cells)
@@ -189,29 +205,238 @@ def parse_text(text):
                 comp = new_company("(company not named)")
                 sec["companies"].append(comp)
             comp["rows"].append(row)
-        elif is_company_line(line) and (comp is None or comp["rows"]
-                                        or len(line) < 120):
+            continue
+        is_name = company_key(line) and len(line) < 170 and (comp is None or comp["rows"])
+        if is_name:
             comp = new_company(line)
             sec["companies"].append(comp)
-        elif comp is not None:
-            comp["notes"].append(line)
-            comp["notes_html"].append(htmlmod.escape(line))
+        elif comp is not None and not comp["rows"]:
+            # a company name wrapped onto a second line in the PDF
+            if not comp["notes"] and comp["name"].count("(") > comp["name"].count(")"):
+                joined = comp["name"] + " " + line
+                comp["name"] = REVISED_RE.sub("", joined).strip()
+                comp["revised"] = comp["revised"] or bool(REVISED_RE.search(joined))
+            # a note wrapped across lines: join until it ends with a full stop
+            elif comp["notes"] and not comp["notes"][-1].rstrip().endswith((".", ":")):
+                comp["notes"][-1] += " " + line
+            else:
+                comp["notes"].append(line)
     return [s for s in sections if s["companies"]]
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_page(url):
-    import requests
-    r = requests.get(url, timeout=30, headers={
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
-        "Accept-Language": "en-US,en;q=0.9"})
-    r.raise_for_status()
-    return r.text
+# ---------------------------------------------------------------------------
+# Rate extraction from filings
+# ---------------------------------------------------------------------------
+NUM_TOKEN = re.compile(r"^(\(\$?-?[\d,]*\.?\d+%?\)|-?\$?-?[\d,]*\.?\d+%?)$")
+CLASS_CODE_RE = re.compile(r"\b([RGT])\s?-\s?(\d{1,2})[A-Z]?\b")
+RATE_RE = re.compile(r"\(?-?\$?\d*\.\d{3,6}\)?")
+GAF_LABEL = re.compile(r"cost of gas|\bcga\b|\bgaf\b|gas adjustment factor", re.I)
+LDAF_LABEL = re.compile(r"total ldac|\bldac\b|\bldaf\b|local distribution adjustment", re.I)
+PROPOSED = re.compile(r"^(proposed|illustrative|new|revised)\b|proposed/illustrative"
+                      r"|proposed rates|illustrative rates", re.I)
+CURRENT = re.compile(r"^(current|present|existing|approved)\b|rates in effect", re.I)
+
+
+def split_row(line):
+    toks = line.split()
+    vals = []
+    while toks and NUM_TOKEN.match(toks[-1]):
+        vals.append(to_num(toks.pop()))
+    vals.reverse()
+    label = re.sub(r"^\d+\s*(?=[A-Za-z(])", "", " ".join(toks)).strip()
+    return label, vals
+
+
+def class_codes(text):
+    """'G-41B/E, G-51B/E' -> {'G-41','G-51'}; adds RES / RES-H / RES-NH tags."""
+    t = text.upper()
+    codes = {f"{a}-{b}" for a, b in CLASS_CODE_RE.findall(t)}
+    # "G-41/G-51" and "G-41, G-42, G-43" are covered; also "G-41/51"
+    for a, b, rest in re.findall(r"\b([RGT])-(\d{1,2})[A-Z]?((?:\s*/\s*\d{1,2}[A-Z]?)+)", t):
+        for n in re.findall(r"\d{1,2}", rest):
+            codes.add(f"{a}-{n}")
+    low = text.lower()
+    if "residential" in low:
+        if "non-heating" in low or "non heating" in low:
+            codes.add("RES-NH")
+        elif "heating" in low:
+            codes.add("RES-H")
+        else:
+            codes.add("RES")
+    return codes
+
+
+def month_order(lines):
+    for line in lines[:30]:
+        found = re.findall(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
+                           line.lower())
+        if len(found) >= 10:
+            return found[:12]
+    return None
+
+
+def extract_schedule(lines, month):
+    """Typical-bill schedule page: one rate class per page, monthly columns.
+    Returns dict or None."""
+    head = " ".join(lines[:15])
+    cls_line = next((l for l in lines[:15] if re.search(r"typical|residential|rate\s+[RG]-?\d",
+                                                        l, re.I) and CLASS_CODE_RE.search(l.upper())), None)
+    order = month_order(lines)
+    if not cls_line or not order:
+        return None
+    codes = {f"{a}-{b}" for a, b in CLASS_CODE_RE.findall(cls_line.upper())}
+    block, found = "current", {"current": {}, "proposed": {}}
+    in_body = False            # block headers only count below the month header
+    for line in lines:
+        if not in_body:
+            in_body = len(re.findall(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov"
+                                     r"|dec)", line.lower())) >= 10
+            continue
+        label, vals = split_row(line)
+        if len(vals) < 3:
+            txt = re.sub(r"^\d+\s*", "", line).strip()
+            if PROPOSED.search(txt):
+                block = "proposed"
+            elif CURRENT.search(txt):
+                block = "current"
+            continue
+        if len(vals) < 12 or re.search(r"recon|exogenous", label, re.I):
+            continue
+        kind = ("LDAF" if LDAF_LABEL.search(label)
+                else "GAF" if GAF_LABEL.search(label) else None)
+        if not kind or kind in found[block]:
+            continue
+        idx = order.index(month) if month in order else 0
+        found[block][kind] = (vals[idx], label)
+    if not found["proposed"] and not found["current"]:
+        return None
+    use = found["proposed"] or found["current"]
+    return {"class_line": re.sub(r"^\d+\s*", "", cls_line).strip(), "codes": codes,
+            "gaf": use.get("GAF", (None, ""))[0], "ldaf": use.get("LDAF", (None, ""))[0],
+            "which": "proposed" if found["proposed"] else "current",
+            "cur_gaf": found["current"].get("GAF", (None, ""))[0],
+            "cur_ldaf": found["current"].get("LDAF", (None, ""))[0],
+            "low_income": bool(re.search(r"low income", head, re.I))}
+
+
+def extract_table_rows(lines):
+    """Generic rate table: lines naming a rate class followed by $/therm rates."""
+    out = []
+    col_kinds = None          # e.g. ["GAF","LDAF"] from the nearest header
+    page_kind = None
+    head = " ".join(lines[:12])
+    if LDAF_LABEL.search(head) and not GAF_LABEL.search(head):
+        page_kind = "LDAF"
+    elif GAF_LABEL.search(head) and not LDAF_LABEL.search(head):
+        page_kind = "GAF"
+    for line in lines:
+        low = line.lower()
+        g, l_ = GAF_LABEL.search(line), LDAF_LABEL.search(line)
+        codes = class_codes(line)
+        rates = [to_num(x) for x in RATE_RE.findall(line)]
+        rates = [r for r in rates if r is not None and -1 < r < 5]
+        if (g or l_) and not rates:
+            kinds = sorted([(m.start(), k) for m, k in ((g, "GAF"), (l_, "LDAF")) if m])
+            col_kinds = [k for _, k in kinds]
+            continue
+        if not codes or not rates:
+            continue
+        label = re.split(r"\s\(?-?\$?\d*\.\d{3,6}", line)[0].strip()
+        gaf = ldaf = None
+        if col_kinds and len(col_kinds) == 2 and len(rates) >= 2:
+            vals = dict(zip(col_kinds, rates[:2]))
+            gaf, ldaf = vals.get("GAF"), vals.get("LDAF")
+        elif col_kinds and len(col_kinds) == 2 and len(rates) == 1:
+            gaf = rates[0] if "mdcq" in low or "demand" in low else None
+            ldaf = None if gaf is not None else rates[0]
+            if gaf is None and ldaf is None:
+                continue
+        elif col_kinds and len(col_kinds) == 1:
+            gaf, ldaf = (rates[0], None) if col_kinds[0] == "GAF" else (None, rates[0])
+        elif page_kind:
+            gaf, ldaf = (rates[0], None) if page_kind == "GAF" else (None, rates[0])
+        elif len(rates) >= 2:
+            gaf, ldaf = rates[0], rates[1]
+        else:
+            continue
+        out.append({"label": label, "codes": codes, "gaf": gaf, "ldaf": ldaf,
+                    "unit": "$/MDCQ Therms" if "mdcq" in low else "$/Therm"})
+    return out
+
+
+def read_pdf(name, data):
+    import pdfplumber
+    pages = []
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        for i, p in enumerate(pdf.pages, 1):
+            pages.append((i, (p.extract_text() or "").splitlines()))
+    return pages
+
+
+def analyse_pdf(name, data, month):
+    """Returns dict(kind='page'|'filing', sections | rates, company)."""
+    pages = read_pdf(name, data)
+    full = "\n".join("\n".join(l) for _, l in pages)
+    if SECTION_RE.search(full) and re.search(r"Rate Class\s+Billing Unit", full):
+        return {"kind": "page", "sections": parse_page_text(full)}
+    comp = company_key(name) or company_key(full[:4000])
+    rates = []
+    for pno, lines in pages:
+        sch = extract_schedule(lines, month)
+        if sch:
+            rates.append({"Source": f"p.{pno} · {sch['class_line']}",
+                          "Rate class (filing)": ", ".join(sorted(sch["codes"])),
+                          "codes": sch["codes"], "Billing Unit": "$/Therm",
+                          "GAF": sch["gaf"], "LDAF": sch["ldaf"],
+                          "Block": sch["which"], "low_income": sch["low_income"]})
+            continue
+        for r in extract_table_rows(lines):
+            rates.append({"Source": f"p.{pno} · {r['label'][:60]}",
+                          "Rate class (filing)": r["label"][:60], "codes": r["codes"],
+                          "Billing Unit": r["unit"], "GAF": r["gaf"], "LDAF": r["ldaf"],
+                          "Block": "table", "low_income": "low income" in r["label"].lower()})
+    return {"kind": "filing", "company": comp, "rates": rates, "pages": len(pages)}
 
 
 # ---------------------------------------------------------------------------
-# Next-revision logic
+# Matching filing rates to the page's rate-class rows
+# ---------------------------------------------------------------------------
+
+def match_rate(row, rates):
+    """Pick the filing rate for one page row. Returns (rate, note)."""
+    rc = row["Rate Class"]
+    codes = class_codes(rc)
+    unit_mdcq = "mdcq" in row["Billing Unit"].lower()
+    pool = [r for r in rates if ("mdcq" in r["Billing Unit"].lower()) == unit_mdcq]
+    cls = sorted(c for c in codes if re.match(r"[RGT]-\d", c))
+    if cls:
+        # first listed class (R-1 for "R-1, R-2", R-3 for "R-3, R-4") wins
+        for c in cls:
+            hit = [r for r in pool if c in r["codes"]]
+            if hit:
+                others = [r for r in pool if r["codes"] & set(cls) and r not in hit]
+                note = ""
+                for o in others:
+                    if (o["GAF"], o["LDAF"]) != (hit[0]["GAF"], hit[0]["LDAF"]):
+                        note = (f"{', '.join(sorted(o['codes'] & set(cls)))} differs in the "
+                                f"filing (GAF {fmt_rate(o['GAF'])}, LDAF {fmt_rate(o['LDAF'])})")
+                return hit[0], note
+        return None, ""
+    if "RES" in codes or "RES-H" in codes:        # "All Residential"
+        for want in ("R-3", "RES-H", "RES", "R-1", "RES-NH"):
+            hit = [r for r in pool if want in r["codes"] and not r["low_income"]]
+            if hit:
+                return hit[0], ("" if want in ("R-3", "RES-H", "RES") else
+                                f"used {want} — no residential heating rate in the filing")
+    if "RES-NH" in codes:
+        hit = [r for r in pool if r["codes"] & {"R-1", "RES-NH"}]
+        if hit:
+            return hit[0], ""
+    return None, ""
+
+
+# ---------------------------------------------------------------------------
+# Section building / exports
 # ---------------------------------------------------------------------------
 
 def season_for(d):
@@ -238,42 +463,31 @@ def build_title(season, yr, rev, start, end):
 
 
 def rows_df(rows):
-    df = pd.DataFrame(rows, columns=HEADER)
-    return df.astype({"Rate Class": "string", "Billing Unit": "string",
-                      "GAF": "float64", "LDAF": "float64"})
-
-
-def same_rows(a, b):
-    if len(a) != len(b):
-        return False
-    for x, y in zip(a, b):
-        for k in HEADER:
-            vx, vy = x.get(k), y.get(k)
-            if k in ("GAF", "LDAF"):
-                nx = vx is None or pd.isna(vx)
-                ny = vy is None or pd.isna(vy)
-                if nx != ny or (not nx and abs(float(vx) - float(vy)) > 1e-9):
-                    return False
-            elif str(vx or "").strip() != str(vy or "").strip():
-                return False
-    return True
+    return pd.DataFrame(rows, columns=HEADER).astype(
+        {"Rate Class": "string", "Billing Unit": "string",
+         "GAF": "float64", "LDAF": "float64"})
 
 
 def df_to_rows(df):
     out = []
     for r in df.to_dict("records"):
-        if not str(r.get("Rate Class") or "").strip() and r.get("GAF") is None:
+        rc = "" if pd.isna(r["Rate Class"]) else str(r["Rate Class"])
+        if not rc.strip() and pd.isna(r["GAF"]) and pd.isna(r["LDAF"]):
             continue
-        out.append({"Rate Class": "" if pd.isna(r["Rate Class"]) else str(r["Rate Class"]),
+        out.append({"Rate Class": rc,
                     "Billing Unit": "" if pd.isna(r["Billing Unit"]) else str(r["Billing Unit"]),
                     "GAF": None if pd.isna(r["GAF"]) else float(r["GAF"]),
                     "LDAF": None if pd.isna(r["LDAF"]) else float(r["LDAF"])})
     return out
 
 
-# ---------------------------------------------------------------------------
-# Exports
-# ---------------------------------------------------------------------------
+def same_rows(a, b):
+    if len(a) != len(b):
+        return False
+    return all(fmt_rate(x[k]) == fmt_rate(y[k]) if k in ("GAF", "LDAF")
+               else str(x[k]).strip() == str(y[k]).strip()
+               for x, y in zip(a, b) for k in HEADER)
+
 
 def to_text(sec, repeat_header=True):
     hdr = "\t".join(HEADER)
@@ -294,10 +508,9 @@ def to_html(sec):
     e = htmlmod.escape
     out = [f"<h2>{e(sec['title'])}</h2>"]
     for c in sec["companies"]:
-        badge = ' <strong>REVISED</strong>' if c["revised"] else ""
+        badge = " <strong>REVISED</strong>" if c["revised"] else ""
         out.append(f"<h3>{e(c['name'])}{badge}</h3>")
-        for n in (c["notes_html"] or [e(n) for n in c["notes"]]):
-            out.append(f"<p>{n}</p>")
+        out += [f"<p>{e(n)}</p>" for n in c["notes"]]
         out.append("<table>\n  <thead><tr>" + "".join(f"<th>{h}</th>" for h in HEADER)
                    + "</tr></thead>\n  <tbody>")
         for r in c["rows"]:
@@ -308,140 +521,112 @@ def to_html(sec):
     return "\n".join(out) + "\n"
 
 
-def to_long(sections):
-    recs = []
-    for s in sections:
-        for c in s["companies"]:
-            for r in c["rows"]:
-                recs.append({
-                    "Section": s["title"],
-                    "Effective from": mdy(s["start"]) if s.get("start") else "",
-                    "Effective through": mdy(s["end"]) if s.get("end") else "",
-                    "Company": c["name"], "REVISED": "Yes" if c["revised"] else "",
-                    "Rate Class": r["Rate Class"], "Billing Unit": r["Billing Unit"],
-                    "GAF": fmt_rate(r["GAF"]), "LDAF": fmt_rate(r["LDAF"]),
-                    "Note": " ".join(c["notes"])})
-    return pd.DataFrame(recs)
+def to_long(sec):
+    return pd.DataFrame([{
+        "Section": sec["title"], "Company": c["name"],
+        "REVISED": "Yes" if c["revised"] else "", "Rate Class": r["Rate Class"],
+        "Billing Unit": r["Billing Unit"], "GAF": fmt_rate(r["GAF"]),
+        "LDAF": fmt_rate(r["LDAF"]), "Note": " ".join(c["notes"])}
+        for c in sec["companies"] for r in c["rows"]])
 
 
-def slug(title):
-    """mass.gov anchor: 'Off-Peak/Summer 2026 Rates Revision 3 (Effective
-    10/1/26 through 10/31/26)' -> 'off-peaksummer-2026-rates-revision-3-
-    effective-10126-through-103126'"""
-    s = re.sub(r"[^a-z0-9\s-]", "", title.lower())
-    return re.sub(r"-{2,}", "-", re.sub(r"\s+", "-", s.strip()))
+def to_excel(sec):
+    """One sheet laid out like the webpage, plus a flat table sheet."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
 
-
-def anchor_url(title):
-    return f"{PAGE_URL}#{slug(title)}"
-
-
-def toc_text(titles):
-    return "\n".join(f"{t}\t{anchor_url(t)}" for t in titles) + "\n"
-
-
-def toc_html(titles):
-    e = htmlmod.escape
-    return ("<ul>\n" + "\n".join(f'  <li><a href="#{slug(t)}">{e(t)}</a></li>'
-                                 for t in titles) + "\n</ul>\n")
-
-
-def compare_sections(old, new):
-    """Row-level differences between two sections (old -> new)."""
-    def key(name):
-        low = name.lower()
-        return next((k for k in COMPANY_KEYS if k in low), low)
-    old_by = {key(c["name"]): c for c in old["companies"]}
-    recs = []
-    for c in new["companies"]:
-        o = old_by.pop(key(c["name"]), None)
-        if o is None:
-            recs.append({"Company": c["name"], "Rate Class": "(company added)",
-                         "Field": "", "Old": "", "New": "", "REVISED on page": ""})
-            continue
-        orows = {(r["Rate Class"], r["Billing Unit"]): r for r in o["rows"]}
-        for r in c["rows"]:
-            rk = (r["Rate Class"], r["Billing Unit"])
-            orow = orows.pop(rk, None)
-            for f in ("GAF", "LDAF"):
-                ov = fmt_rate(orow[f]) if orow else "(new row)"
-                nv = fmt_rate(r[f])
-                if ov != nv:
-                    recs.append({"Company": c["name"], "Rate Class": " ".join(rk),
-                                 "Field": f, "Old": ov, "New": nv,
-                                 "REVISED on page": "Yes" if c["revised"] else "No"})
-        for rk in orows:
-            recs.append({"Company": c["name"], "Rate Class": " ".join(rk),
-                         "Field": "(row removed)", "Old": "", "New": "",
-                         "REVISED on page": "Yes" if c["revised"] else "No"})
-    for c in old_by.values():
-        recs.append({"Company": c["name"], "Rate Class": "(company removed)",
-                     "Field": "", "Old": "", "New": "", "REVISED on page": ""})
-    return pd.DataFrame(recs, columns=["Company", "Rate Class", "Field", "Old", "New",
-                                       "REVISED on page"])
-
-
-def show_section(sec):
-    st.markdown(f"#### {sec['title']}")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Webpage layout"
+    blue = PatternFill("solid", fgColor="14558F")
+    thin = Side(style="thin", color="D9D9D9")
+    r = 1
+    ws.cell(r, 1, sec["title"]).font = Font(bold=True, size=14, color="14558F")
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+    r += 2
     for c in sec["companies"]:
-        badge = "  :red[**REVISED**]" if c["revised"] else ""
-        st.markdown(f"**{c['name']}**{badge}")
+        ws.cell(r, 1, c["name"]).font = Font(bold=True, size=12)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+        if c["revised"]:
+            ws.cell(r, 5, "REVISED").font = Font(bold=True, color="CD0D0D")
+        r += 1
         for n in c["notes"]:
-            st.caption(n)
-        show = pd.DataFrame([{**r, "GAF": fmt_rate(r["GAF"]), "LDAF": fmt_rate(r["LDAF"])}
-                             for r in c["rows"]], columns=HEADER)
-        st.dataframe(show, hide_index=True, width="stretch")
+            cell = ws.cell(r, 1, n)
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            cell.font = Font(italic=True)
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+            ws.row_dimensions[r].height = 15 * max(1, len(n) // 95 + 1)
+            r += 1
+        for j, h in enumerate(HEADER, 1):
+            cell = ws.cell(r, j, h)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = blue
+        r += 1
+        for row in c["rows"]:
+            vals = [row["Rate Class"], row["Billing Unit"], row["GAF"], row["LDAF"]]
+            for j, v in enumerate(vals, 1):
+                cell = ws.cell(r, j, v)
+                cell.border = Border(bottom=thin)
+                if j >= 3:
+                    cell.number_format = "0.0000"
+                    cell.alignment = Alignment(horizontal="right")
+            r += 1
+        r += 1
+    for j, w in enumerate([38, 16, 10, 10, 11], 1):
+        ws.column_dimensions[get_column_letter(j)].width = w
+
+    flat = wb.create_sheet("Table")
+    cols = ["Section", "Company", "REVISED", "Rate Class", "Billing Unit", "GAF",
+            "LDAF", "Note"]
+    flat.append(cols)
+    for cell in flat[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = blue
+    for c in sec["companies"]:
+        for row in c["rows"]:
+            flat.append([sec["title"], c["name"], "REVISED" if c["revised"] else "",
+                         row["Rate Class"], row["Billing Unit"], row["GAF"], row["LDAF"],
+                         " ".join(c["notes"])])
+    for row in flat.iter_rows(min_row=2, min_col=6, max_col=7):
+        for cell in row:
+            cell.number_format = "0.0000"
+    for j, w in enumerate([62, 50, 10, 34, 16, 10, 10, 60], 1):
+        flat.column_dimensions[get_column_letter(j)].width = w
+    flat.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
-# ---------------------------------------------------------------------------
-# Fill from Peak chart Parts
-# ---------------------------------------------------------------------------
-
-def heating_row_index(rows):
-    for pat in (r"residential heating|\br-?3\b", r"all residential"):
-        for i, r in enumerate(rows):
-            if re.search(pat, r["Rate Class"], re.I):
-                return i
-    return None
-
-
-def plan_from_part(part, companies, base_by_name, use_gaf, use_ldaf, spread_gaf,
-                   colonial_uses_boston):
-    peak = part["peak"].set_index("Company")
-    ldaf = part["ldaf"].set_index("Company")
-    changes = []
-    for peak_name, key in PEAK_TO_SITE.items():
-        comp = next((c for c in companies if key in c["name"].lower()), None)
-        if comp is None or not comp["rows"]:
-            continue
-        idx = heating_row_index(comp["rows"])
-        if idx is None:
-            continue
-        new_gaf = peak.at[peak_name, "prop_gaf"] if peak_name in peak.index else None
-        if (new_gaf is None or pd.isna(new_gaf)) and colonial_uses_boston \
-                and peak_name == "former Colonial Gas":
-            new_gaf = peak.at["Boston Gas", "prop_gaf"]
-        new_ldaf = ldaf.at[peak_name, "prop_ldaf"] if peak_name in ldaf.index else None
-        hrow = comp["rows"][idx]
-        old_gaf = hrow["GAF"]
-        if use_gaf and new_gaf is not None and not pd.isna(new_gaf):
-            new_gaf = round(float(new_gaf), 4)
-            targets = [idx]
-            if spread_gaf and old_gaf is not None:
-                targets = [i for i, r in enumerate(comp["rows"])
-                           if r["GAF"] is not None and abs(r["GAF"] - old_gaf) < 1e-9
-                           and "therm" in r["Billing Unit"].lower()
-                           and "mdcq" not in r["Billing Unit"].lower()]
-            for i in targets:
-                if comp["rows"][i]["GAF"] != new_gaf:
-                    changes.append((comp["name"], i, "GAF", comp["rows"][i]["GAF"],
-                                    new_gaf, peak_name))
-        if use_ldaf and new_ldaf is not None and not pd.isna(new_ldaf):
-            new_ldaf = round(float(new_ldaf), 4)
-            if hrow["LDAF"] != new_ldaf:
-                changes.append((comp["name"], idx, "LDAF", hrow["LDAF"], new_ldaf,
-                                peak_name))
-    return changes
+def page_preview_html(sec):
+    """Render the section the way it looks on mass.gov."""
+    e = htmlmod.escape
+    css = ("<style>.mg{font-family:'Noto Sans',Helvetica,Arial,sans-serif;color:#141414}"
+           ".mg h2{font-size:1.6rem;font-weight:700;border-bottom:3px solid #14558f;"
+           "padding-bottom:.3rem;margin:1rem 0}"
+           ".mg h3{font-size:1.2rem;font-weight:700;margin:1.4rem 0 .4rem}"
+           ".mg .rev{color:#cd0d0d;font-weight:700;margin-left:.4rem}"
+           ".mg p{margin:.3rem 0 .6rem;line-height:1.5}"
+           ".mg table{border-collapse:collapse;width:100%;margin-bottom:.8rem}"
+           ".mg th{background:#14558f;color:#fff;text-align:left;padding:.5rem .7rem}"
+           ".mg td{border-bottom:1px solid #d9d9d9;padding:.45rem .7rem}"
+           ".mg tr:nth-child(even) td{background:#f2f2f2}</style>")
+    body = [f"<div class='mg'><h2>{e(sec['title'])}</h2>"]
+    for c in sec["companies"]:
+        rev = "<span class='rev'>REVISED</span>" if c["revised"] else ""
+        body.append(f"<h3>{e(c['name'])}{rev}</h3>")
+        body += [f"<p>{e(n)}</p>" for n in c["notes"]]
+        body.append("<table><thead><tr>" + "".join(f"<th>{h}</th>" for h in HEADER)
+                    + "</tr></thead><tbody>")
+        for r in c["rows"]:
+            body.append("<tr>" + "".join(f"<td>{e(v)}</td>" for v in (
+                r["Rate Class"], r["Billing Unit"], fmt_rate(r["GAF"]),
+                fmt_rate(r["LDAF"]))) + "</tr>")
+        body.append("</tbody></table>")
+    body.append("</div>")
+    return css + "".join(body)
 
 
 # ---------------------------------------------------------------------------
@@ -450,261 +635,201 @@ def plan_from_part(part, companies, base_by_name, use_gaf, use_ldaf, spread_gaf,
 
 def massgov_page():
     ss = st.session_state
-    ss.setdefault("mg_sections", [])
-    ss.setdefault("mg_draft", None)
+    ss.setdefault("mg_base", parse_page_text(DEFAULT_PAGE_TEXT)[0])
+    ss.setdefault("mg_files", {})          # filename -> analysis
     ss.setdefault("mg_ver", 0)
 
     st.title("Mass.gov Rate Page — Gas Supply and Delivery Charges")
     st.caption("Created by Cathy Kam")
 
-    # ---- 1. Pull posted rates --------------------------------------------
-    st.subheader("1 · Pull the posted rates")
-    c1, c2 = st.columns([4, 1])
-    url = c1.text_input("Page URL", PAGE_URL, label_visibility="collapsed")
-    if c2.button("Pull from mass.gov", type="primary"):
-        try:
-            with st.spinner("Reading mass.gov…"):
-                secs = parse_html(fetch_page(url.split("#")[0]))
-            if secs:
-                ss.mg_sections = secs
-                st.success(f"Found {len(secs)} rate sections.")
-            else:
-                st.error("The page loaded but no rate sections were recognised. "
-                         "Use one of the options below.")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Could not read mass.gov ({e}). The site sometimes blocks "
-                     "automated requests — use one of the options below instead.")
-
-    with st.expander("Other ways to load the page (if the pull is blocked)"):
-        up = st.file_uploader("Drop a saved copy of the page (in your browser: "
-                              "File → Save Page As… → Webpage, HTML only)",
-                              type=["html", "htm"], key="mg_html")
-        pasted = st.text_area("…or paste text copied from the page (select from a "
-                              "section heading down through its tables)", height=150)
-        if st.button("Load from file / pasted text"):
-            secs = []
-            if up is not None:
-                secs = parse_html(up.getvalue().decode("utf-8", errors="ignore"))
-            if not secs and pasted.strip():
-                secs = parse_text(pasted)
-            if secs:
-                ss.mg_sections = secs
-                st.success(f"Found {len(secs)} rate sections.")
-            else:
-                st.error("No rate sections recognised. Each section must start "
-                         "with a heading like 'Off-Peak/Summer 2026 Rates Revision 3 "
-                         "(Effective 10/1/26 through 10/31/26)'.")
-
-    sections = ss.mg_sections
-    if not sections:
-        st.info("Pull the page to begin.")
-        return
-
-    titles = [s["title"] for s in sections]
-
-    # every posted revision, newest first, grouped by season, with page links
-    st.markdown(f"**Posted revisions ({len(sections)})**")
-    groups = {}
-    for i, s in enumerate(sections):
-        groups.setdefault(f"{s.get('season') or ''} {s.get('yr') or ''}".strip()
-                          or "Other", []).append(i)
-    for g_i, (gname, idxs) in enumerate(groups.items()):
-        with st.expander(f"{gname} — {len(idxs)} section(s)", expanded=g_i == 0):
-            st.markdown("\n".join(
-                f"- [{titles[i]}]({anchor_url(titles[i])})  "
-                f"· revised: {', '.join(c['name'].split(' (')[0] for c in sections[i]['companies'] if c['revised']) or 'none flagged'}"
-                for i in idxs))
-
-    pick = st.selectbox("View a posted section", range(len(sections)),
-                        format_func=lambda i: titles[i])
-    with st.expander("Show section", expanded=False):
-        show_section(sections[pick])
-
-    with st.expander("Compare two revisions"):
-        cc = st.columns(2)
-        new_i = cc[0].selectbox("Newer", range(len(sections)), index=0,
-                                format_func=lambda i: titles[i], key="mg_cmp_new")
-        old_i = cc[1].selectbox("Older", range(len(sections)),
-                                index=min(1, len(sections) - 1),
-                                format_func=lambda i: titles[i], key="mg_cmp_old")
-        diff = compare_sections(sections[old_i], sections[new_i])
-        if diff.empty:
-            st.caption("No differences.")
-        else:
-            st.dataframe(diff, hide_index=True, width="stretch")
-            st.download_button("Comparison · CSV",
-                               diff.to_csv(index=False).encode("utf-8-sig"),
-                               file_name="massgov_revision_comparison.csv",
-                               mime="text/csv")
-    d1, d2 = st.columns(2)
-    d1.download_button("This section · CSV",
-                       to_long([sections[pick]]).to_csv(index=False).encode("utf-8-sig"),
-                       file_name="massgov_section.csv", mime="text/csv")
-    d2.download_button("All posted sections · CSV (history)",
-                       to_long(sections).to_csv(index=False).encode("utf-8-sig"),
-                       file_name="massgov_all_sections.csv", mime="text/csv")
-
-    # ---- 2. Start the next revision --------------------------------------
-    st.subheader("2 · Start the next revision")
-    base_i = st.selectbox("Start from (carried forward unless changed)",
-                          range(len(sections)), format_func=lambda i: titles[i],
-                          key="mg_base")
-    base = sections[base_i]
+    # ---- 1. Drop PDFs ------------------------------------------------------
+    st.subheader("1 · Drop PDFs")
+    base = ss.mg_base
     s_season, s_yr, s_rev, s_start, s_end = suggest_next(base)
-    g = st.columns([2, 1.2, 1, 1.3, 1.3])
-    season = g[0].selectbox("Season", ["Peak/Winter", "Off-Peak/Summer"],
-                            index=0 if s_season == "Peak/Winter" else 1,
-                            key=f"mg_season_{base_i}")
-    yr = g[1].text_input("Year", s_yr, key=f"mg_yr_{base_i}")
-    rev = g[2].number_input("Revision (0 = none)", 0, 20, s_rev, key=f"mg_rev_{base_i}")
-    start = g[3].date_input("Effective from", s_start, key=f"mg_start_{base_i}",
-                            format="MM/DD/YYYY")
-    end = g[4].date_input("Through", s_end, key=f"mg_end_{base_i}",
-                          format="MM/DD/YYYY")
-    title = build_title(season, yr, rev, start, end)
-    st.markdown(f"New section title: **{title}**")
+    files = st.file_uploader(
+        "Drag and drop company rate filings (PDF). To update the starting layout, "
+        "also drop a PDF of the mass.gov page (browser: Print → Save as PDF).",
+        type=["pdf"], accept_multiple_files=True, key="mg_pdfs")
 
-    if st.button("Create draft from this base", type="primary"):
-        comps = copy.deepcopy(base["companies"])
-        for c in comps:
-            c["revised"] = False
-        ss.mg_draft = {"base_title": base["title"],
-                       "base": {c["name"]: copy.deepcopy(c["rows"]) for c in comps},
-                       "companies": comps, "rows_base": {c["name"]: c["rows"] for c in comps},
-                       "flag": {c["name"]: "Auto" for c in comps}}
-        ss.mg_ver += 1
-        st.rerun()
-
-    draft = ss.mg_draft
-    if not draft:
-        return
-    draft["title"] = title
-    st.caption(f"Draft carried forward from: {draft['base_title']}")
-
-    # ---- 3. Fill in new values -------------------------------------------
-    st.subheader("3 · Fill in new values")
-    parts = ss.get("parts") or []
     with st.container(border=True):
-        st.markdown("**From the Peak chart** — proposed R-3 GAF and LDAF go into each "
-                    "company's residential heating row (or All Residential).")
-        if not parts:
-            st.caption("No Parts yet — build them on the Peak chart page first.")
-        else:
-            pi = st.selectbox("Part", range(len(parts)),
-                              format_func=lambda i: parts[i]["name"], key="mg_part")
-            o = st.columns(4)
-            use_gaf = o[0].checkbox("Update GAF", True)
-            use_ldaf = o[1].checkbox("Update LDAF", True)
-            spread = o[2].checkbox("Apply new GAF to other classes that shared the "
-                                   "old residential heating GAF", True,
-                                   help="On the posted page the G-4x classes usually "
-                                        "share the R-3 GAF. Rows with a different GAF "
-                                        "(e.g. R-1/R-2, G-5x, MDCQ) are left alone.")
-            colo = o[3].checkbox("Colonial uses Boston Gas GAF if blank", True)
-            changes = plan_from_part(parts[pi], draft["companies"], draft["base"],
-                                     use_gaf, use_ldaf, spread, colo)
-            if changes:
-                st.dataframe(pd.DataFrame([{
-                    "Company": c, "Rate Class": next(
-                        x for x in draft["companies"] if x["name"] == c)["rows"][i]["Rate Class"],
-                    "Field": f, "Current": fmt_rate(old), "New": fmt_rate(new),
-                    "From Peak chart row": src} for c, i, f, old, new, src in changes]),
-                    hide_index=True, width="stretch")
-                if st.button(f"Apply {len(changes)} change(s)", type="primary"):
-                    for cname, i, f, _, new, _ in changes:
-                        comp = next(x for x in draft["companies"] if x["name"] == cname)
-                        comp["rows"][i][f] = new
-                    draft["rows_base"] = {c["name"]: copy.deepcopy(c["rows"])
-                                          for c in draft["companies"]}
+        st.markdown("**New section**")
+        g = st.columns([2, 1.2, 1, 1.3, 1.3])
+        season = g[0].selectbox("Season", ["Peak/Winter", "Off-Peak/Summer"],
+                                index=0 if s_season == "Peak/Winter" else 1,
+                                key=f"mg_season_{base['title']}")
+        yr = g[1].text_input("Year", s_yr, key=f"mg_yr_{base['title']}")
+        rev = g[2].number_input("Revision (0 = none)", 0, 20, s_rev,
+                                key=f"mg_rev_{base['title']}")
+        start = g[3].date_input("Effective from", s_start, format="MM/DD/YYYY",
+                                key=f"mg_start_{base['title']}")
+        end = g[4].date_input("Through", s_end, format="MM/DD/YYYY",
+                              key=f"mg_end_{base['title']}")
+        title = build_title(season, yr, rev, start, end)
+        st.markdown(f"**{title}**  \nStarting layout and carried-forward values: "
+                    f"*{base['title']}*")
+    month = MONTHS[start.month - 1]
+
+    if files:
+        for f in files:
+            key = (f.name, f.size, month)
+            if ss.mg_files.get(f.name, {}).get("key") != key:
+                try:
+                    res = analyse_pdf(f.name, f.getvalue(), month)
+                except Exception as e:  # noqa: BLE001
+                    res = {"kind": "error", "error": str(e)}
+                res["key"] = key
+                ss.mg_files[f.name] = res
+                if res["kind"] == "page" and res["sections"]:
+                    ss.mg_base = res["sections"][0]
                     ss.mg_ver += 1
                     st.rerun()
-            else:
-                st.caption("Nothing to change from this Part.")
-
-    st.markdown("**Edit by company** — change any value, add or delete rows, edit "
-                "notes. REVISED is set automatically when anything differs from the base.")
-    for ci, comp in enumerate(draft["companies"]):
-        name = comp["name"]
-        base_rows = draft["base"].get(name, [])
-        with st.expander(name + ("  ·  changed" if not same_rows(comp["rows"], base_rows)
-                                 else ""), expanded=False):
-            df = st.data_editor(
-                rows_df(draft["rows_base"][name]), num_rows="dynamic", hide_index=True,
-                width="stretch", key=f"mg_ed_{ss.mg_ver}_{ci}",
-                column_config={
-                    "GAF": st.column_config.NumberColumn(format="%.4f"),
-                    "LDAF": st.column_config.NumberColumn(format="%.4f")})
-            comp["rows"] = df_to_rows(df)
-            notes = st.text_area("Note(s) under the heading (one per line)",
-                                 "\n".join(comp["notes"]), key=f"mg_note_{ss.mg_ver}_{ci}")
-            new_notes = [n.strip() for n in notes.splitlines() if n.strip()]
-            if new_notes != comp["notes"]:
-                comp["notes"] = new_notes
-                comp["notes_html"] = [htmlmod.escape(n) for n in new_notes]
-            changed = not same_rows(comp["rows"], base_rows)
-            draft["flag"][name] = st.radio(
-                "REVISED label", ["Auto", "Show", "Hide"],
-                index=["Auto", "Show", "Hide"].index(draft["flag"].get(name, "Auto")),
-                horizontal=True, key=f"mg_flag_{ss.mg_ver}_{ci}",
-                help=f"Auto = {'Show' if changed else 'Hide'} (values "
-                     f"{'differ from' if changed else 'match'} the base)")
-        flag = draft["flag"][name]
-        comp["revised"] = changed if flag == "Auto" else flag == "Show"
-
-    # change summary
-    diffs = []
-    for comp in draft["companies"]:
-        old = draft["base"].get(comp["name"], [])
-        for i, r in enumerate(comp["rows"]):
-            o = old[i] if i < len(old) else {}
-            for f in ("GAF", "LDAF"):
-                if fmt_rate(r[f]) != fmt_rate(o.get(f)):
-                    diffs.append({"Company": comp["name"], "Rate Class": r["Rate Class"],
-                                  "Field": f, "Posted": fmt_rate(o.get(f)),
-                                  "New": fmt_rate(r[f])})
-        if len(old) > len(comp["rows"]):
-            diffs.append({"Company": comp["name"], "Rate Class": "(rows removed)",
-                          "Field": "", "Posted": str(len(old)), "New": str(len(comp["rows"]))})
-    st.markdown(f"**Changes vs. {draft['base_title']}**")
-    if diffs:
-        st.dataframe(pd.DataFrame(diffs), hide_index=True, width="stretch")
+        for gone in set(ss.mg_files) - {f.name for f in files}:
+            del ss.mg_files[gone]
     else:
-        st.caption("No changes yet — the draft matches the base.")
+        ss.mg_files = {}
 
-    # ---- 4. Preview & export ---------------------------------------------
-    st.subheader("4 · Preview and export")
-    sec = {"title": title, "companies": draft["companies"], "start": start, "end": end}
-    with st.expander("Preview as it will appear", expanded=True):
-        show_section(sec)
-    rep = st.checkbox("Repeat the table header after each table (as text copied from "
-                      "the site does)", True)
-    text_out = to_text(sec, rep)
-    html_out = to_html(sec)
-    stamp = f"{start:%Y-%m-%d}"
-    e1, e2, e3 = st.columns(3)
-    e1.download_button("Text (page format)", text_out.encode("utf-8"),
-                       file_name=f"massgov_rates_{stamp}.txt", mime="text/plain",
-                       type="primary")
-    e2.download_button("HTML (for the web editor)", html_out.encode("utf-8"),
-                       file_name=f"massgov_rates_{stamp}.html", mime="text/html")
-    e3.download_button("CSV", to_long([sec]).to_csv(index=False).encode("utf-8-sig"),
-                       file_name=f"massgov_rates_{stamp}.csv", mime="text/csv")
-    with st.expander("Copy text"):
-        st.code(text_out, language=None)
-    with st.expander("Copy HTML"):
-        st.code(html_out, language="html")
+    # ---- 2. Review what was pulled ---------------------------------------
+    filings = {n: r for n, r in ss.mg_files.items() if r["kind"] == "filing"}
+    for n, r in ss.mg_files.items():
+        if r["kind"] == "page":
+            st.success(f"{n}: read as the mass.gov page — {len(r['sections'])} "
+                       f"section(s). Starting layout set to *{r['sections'][0]['title']}*.")
+        elif r["kind"] == "error":
+            st.error(f"{n}: could not read ({r['error']}).")
 
-    # updated list of revisions, new one on top
-    all_titles = [title] + [t for t in titles if t != title]
-    st.markdown("**Updated revision list** (new section on top, with page links)")
-    st.markdown("\n".join(f"- [{t}]({anchor_url(t)})" for t in all_titles[:8])
-                + ("\n- …" if len(all_titles) > 8 else ""))
-    t1, t2 = st.columns(2)
-    t1.download_button("Revision list · text", toc_text(all_titles).encode("utf-8"),
-                       file_name=f"massgov_revision_list_{stamp}.txt",
-                       mime="text/plain")
-    t2.download_button("Revision list · HTML", toc_html(all_titles).encode("utf-8"),
-                       file_name=f"massgov_revision_list_{stamp}.html",
-                       mime="text/html")
-    with st.expander("Copy revision list HTML"):
-        st.code(toc_html(all_titles), language="html")
+    names = [c["name"] for c in base["companies"]]
+    keys = [company_key(c) for c in names]
+    assigned = {}                          # company index -> list of rates
+    if filings:
+        st.subheader("2 · Rates pulled from the filings")
+        st.caption(f"Monthly schedules are read for **{start:%B}** (the effective "
+                   f"month). Proposed rates are used when the filing has them. "
+                   f"Edit any value or untick a row to leave it out.")
+        for fi, (fname, res) in enumerate(filings.items()):
+            with st.container(border=True):
+                c1, c2 = st.columns([3, 2])
+                c1.markdown(f"**{fname}** · {res['pages']} page(s), "
+                            f"{len(res['rates'])} rate row(s) found")
+                guess = keys.index(res["company"]) if res["company"] in keys else None
+                ci = c2.selectbox("Company on the page", range(len(names)),
+                                  index=guess, format_func=lambda i: names[i],
+                                  placeholder="Choose company…",
+                                  key=f"mg_co_{fname}", label_visibility="collapsed")
+                if not res["rates"]:
+                    st.warning("No GAF/LDAF rates recognised in this PDF.")
+                    continue
+                df = pd.DataFrame([{"Use": True, **{k: r[k] for k in (
+                    "Rate class (filing)", "Billing Unit", "GAF", "LDAF", "Block",
+                    "Source")}} for r in res["rates"]])
+                ed = st.data_editor(
+                    df, hide_index=True, width="stretch", key=f"mg_rates_{fname}_{month}",
+                    disabled=["Rate class (filing)", "Block", "Source"],
+                    column_config={"GAF": st.column_config.NumberColumn(format="%.4f"),
+                                   "LDAF": st.column_config.NumberColumn(format="%.4f")})
+                if ci is None:
+                    st.caption("Choose the company to use these rates.")
+                    continue
+                use = []
+                for r, (_, e) in zip(res["rates"], ed.iterrows()):
+                    if e["Use"]:
+                        use.append({**r, "GAF": None if pd.isna(e["GAF"]) else e["GAF"],
+                                    "LDAF": None if pd.isna(e["LDAF"]) else e["LDAF"],
+                                    "Billing Unit": e["Billing Unit"]})
+                assigned.setdefault(ci, []).extend(use)
+
+    # ---- 3. Build the section --------------------------------------------
+    st.subheader("3 · Section as it will appear on the webpage" if filings
+                 else "2 · Section as it will appear on the webpage")
+    spread = st.checkbox(
+        "Apply a changed GAF to other rate classes that shared the same posted GAF "
+        "(e.g. EGMA G-40 to G-43 follow R-3; G-50 to G-53 follow R-1)", True,
+        key="mg_spread")
+    companies, fill_log = [], []
+    for ci, comp in enumerate(base["companies"]):
+        c = copy.deepcopy(comp)
+        c["revised"] = False
+        matched, gaf_moves = set(), {}
+        for ri, row in enumerate(c["rows"]):
+            hit, note = match_rate(row, assigned.get(ci, []))
+            if hit:
+                matched.add(ri)
+                if hit["GAF"] is not None and row["GAF"] is not None and \
+                        "mdcq" not in row["Billing Unit"].lower():
+                    gaf_moves.setdefault(fmt_rate(row["GAF"]), (round(float(hit["GAF"]), 4),
+                                                                row["Rate Class"]))
+            if hit:
+                for f in ("GAF", "LDAF"):
+                    if hit[f] is not None and fmt_rate(hit[f]) != fmt_rate(row[f]):
+                        fill_log.append({"Company": c["name"], "Rate Class": row["Rate Class"],
+                                         "Field": f, "Posted": fmt_rate(row[f]),
+                                         "New": fmt_rate(hit[f]), "From": hit["Source"],
+                                         "Note": note})
+                        row[f] = round(float(hit[f]), 4)
+                if note and not any(x["Note"] == note and x["Company"] == c["name"]
+                                    for x in fill_log):
+                    fill_log.append({"Company": c["name"], "Rate Class": row["Rate Class"],
+                                     "Field": "", "Posted": "", "New": "", "From": hit["Source"],
+                                     "Note": note})
+        if spread:
+            for ri, row in enumerate(c["rows"]):
+                mv = gaf_moves.get(fmt_rate(row["GAF"]))
+                if ri in matched or not mv or "mdcq" in row["Billing Unit"].lower():
+                    continue
+                new, src_cls = mv
+                if fmt_rate(new) != fmt_rate(row["GAF"]):
+                    fill_log.append({"Company": c["name"], "Rate Class": row["Rate Class"],
+                                     "Field": "GAF", "Posted": fmt_rate(row["GAF"]),
+                                     "New": fmt_rate(new),
+                                     "From": f"same GAF as {src_cls} on the posted page",
+                                     "Note": ""})
+                    row["GAF"] = new
+        companies.append(c)
+    unmatched = [n for i, n in enumerate(names) if i in assigned and not any(
+        x["Company"] == n for x in fill_log)]
+    if fill_log:
+        st.markdown("**Filled from the filings**")
+        st.dataframe(pd.DataFrame(fill_log), hide_index=True, width="stretch")
+    for n in unmatched:
+        st.info(f"{n}: the filing's rates match the posted values, or none of its "
+                "rate classes matched a row on the page.")
+
+    st.caption("Values not in any filing are carried forward from the starting layout. "
+               "Fine-tune below; REVISED is set automatically for companies that changed.")
+    final = []
+    flag_opts = ["Auto", "Show", "Hide"]
+    sig = str(sorted((k, v["key"]) for k, v in ss.mg_files.items()))
+    for ci, c in enumerate(companies):
+        posted = base["companies"][ci]["rows"]
+        with st.expander(c["name"] + ("  ·  changed" if not same_rows(c["rows"], posted)
+                                      else ""), expanded=False):
+            ed = st.data_editor(rows_df(c["rows"]), num_rows="dynamic", hide_index=True,
+                                width="stretch",
+                                key=f"mg_ed_{ss.mg_ver}_{ci}_{hash(sig + month)}",
+                                column_config={
+                                    "GAF": st.column_config.NumberColumn(format="%.4f"),
+                                    "LDAF": st.column_config.NumberColumn(format="%.4f")})
+            rows = df_to_rows(ed)
+            notes = st.text_area("Note(s) under the heading (one per line)",
+                                 "\n".join(c["notes"]), key=f"mg_note_{ss.mg_ver}_{ci}")
+            changed = not same_rows(rows, posted)
+            flag = st.radio("REVISED label", flag_opts, horizontal=True,
+                            key=f"mg_flag_{ss.mg_ver}_{ci}",
+                            help=f"Auto = {'Show' if changed else 'Hide'}")
+        final.append({"name": c["name"], "notes": [n.strip() for n in notes.splitlines()
+                                                   if n.strip()],
+                      "rows": rows,
+                      "revised": changed if flag == "Auto" else flag == "Show"})
+
+    sec = {"title": title, "companies": final}
+    with st.container(height=700):
+        st.html(page_preview_html(sec))
+
+    # ---- Export -----------------------------------------------------------
+    st.subheader("Export")
+    st.download_button(
+        "Download Excel", to_excel(sec),
+        file_name=f"massgov_rates_{start:%Y-%m-%d}.xlsx", type="primary",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.caption("Sheet 'Webpage layout' follows the page: section title, company "
+               "heading (REVISED beside it), note, then the Rate Class / Billing Unit "
+               "/ GAF / LDAF table. Sheet 'Table' has the same data as one flat table.")
