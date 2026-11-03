@@ -102,6 +102,11 @@ def main():
             print(f"Page shows: {visible_text(page)}")
             for line in problems[:15]:
                 print(f"  {line}")
+            if os.environ.get("GITHUB_ACTIONS"):      # show the reason on the run page, not only in the log
+                shown = visible_text(page, 400).replace("\n", " ")
+                print(f"::error title=App did not load::{page.url} | title {page.title()!r} | shows: {shown}")
+                for line in problems[:5]:
+                    print(f"::warning title=Page problem::{line}")
         try:
             page.screenshot(path="keep_awake.png", full_page=True)
         except Exception:  # noqa: BLE001
