@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+  <title>GAF Peak Chart Builder | Cathy Kam</title>
+  <meta name="description" content="Builds R-3 peak GAF charts from Massachusetts gas company filings. Runs entirely in your browser; files never leave your device. Built by Cathy Kam." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/browser@1.12.3/build/stlite.css" />
+</head>
+<body>
+  <div id="root"></div>
+  <noscript>This app runs Python in your browser, so it needs JavaScript turned on.</noscript>
+  <script type="module">
+    import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@1.12.3/build/stlite.js";
+
+    // The app's code comes straight from the main branch, so changes pushed there
+    // show up here automatically. Nothing on this branch needs to change.
+    const RAW = "https://raw.githubusercontent.com/cathykam2006/GAF-peak-chart-builder/main/";
+    const FILES = ["gaf_peak_app.py", "latest_rates.py", "massgov_page.py", "pdf_text.py"];
+    const files = {};
+    for (const name of FILES) files[name] = { url: RAW + name };
+
+    mount(
+      {
+        entrypoint: "gaf_peak_app.py",
+        // pypdfium2 has a browser build, so PDFs are read with the same engine
+        // (and give the same text) as on Streamlit.
+        requirements: ["pandas", "openpyxl", "pypdfium2"],
+        files,
+        streamlitConfig: {
+          "server.maxUploadSize": 1000,
+          "client.toolbarMode": "viewer",
+        },
+      },
+      document.getElementById("root"),
+    );
+  </script>
+</body>
+</html>
